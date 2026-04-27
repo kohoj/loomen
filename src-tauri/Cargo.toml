@@ -1,0 +1,20 @@
+[package]
+name = "loomen"
+version = "0.1.0"
+description = "Local agent workbench for parallel coding sessions"
+authors = ["Kohoj"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.5.3", features = [] }
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+libc = "0.2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2.9.4", features = [] }
+thiserror = "2.0"
+uuid = { version = "1.12", features = ["v4", "serde"] }
