@@ -2,6 +2,7 @@ src-tauri/target/
 src-tauri/gen/
 target/
 node_modules/
+.worktrees/
 .DS_Store
 *.log
 *.db
