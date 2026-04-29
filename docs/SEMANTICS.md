@@ -88,7 +88,7 @@ Meaning: send a signal or validation action through one or more paths.
 
 User-facing body: setup scripts, run scripts, shell commands, PTY terminals, and future multi-workspace test broadcasts.
 
-Engineering body: zsh execution, PTY sessions, terminal snapshots, lifecycle logs, persisted run records.
+Engineering body: zsh execution, PTY sessions, terminal snapshots, lifecycle logs, persisted run records, checkpoint-attributed Pulse evidence.
 
 Restraint: Pulse should be repeatable and attributable. The user should know what ran, where it ran, and what it proved.
 

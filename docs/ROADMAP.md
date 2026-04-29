@@ -30,7 +30,7 @@ Loomen should grow as a code-evolution instrument: local-first, evidence-rich, v
 
 ## Pulse Reliable Validation
 
-- Add run history that ties setup/run/terminal output to the workspace state it validated.
+- Make Pulse evidence feed Fuse readiness and workspace comparison views.
 - Add named validation pulses for common commands such as tests, type checks, lint, audit, and build.
 - Add future multi-workspace Pulse to run the same validation across sibling paths.
 - Add pass/fail summaries that can feed Fuse readiness.

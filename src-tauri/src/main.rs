@@ -254,10 +254,14 @@ struct DiffOutput {
 struct TerminalRun {
     id: String,
     workspace_id: String,
+    kind: String,
+    label: String,
     command: String,
     cwd: String,
     output: String,
     exit_code: Option<i32>,
+    checkpoint_id: Option<String>,
+    duration_ms: i64,
     started_at: i64,
     ended_at: i64,
 }
@@ -1038,7 +1042,15 @@ fn run_workspace_setup(
         params![workspace_id, now_ms()],
     )
     .map_err(|err| err.to_string())?;
-    let run = run_shell_command(&workspace_id, &cwd, &script)?;
+    let checkpoint_id = workspace_checkpoint_id(&db, &workspace_id)?;
+    let run = run_shell_command(
+        &workspace_id,
+        &cwd,
+        &script,
+        "setup",
+        "Setup script",
+        checkpoint_id.as_deref(),
+    )?;
     let log_path = write_lifecycle_log(&workspace_id, "setup", &run.output)?;
     let next_state = setup_state_for_exit(run.exit_code);
     db.execute(
@@ -1060,7 +1072,15 @@ fn run_workspace_run_script(
     if script.trim().is_empty() {
         return Err("run script is empty".to_string());
     }
-    let run = run_shell_command(&workspace_id, &cwd, &script)?;
+    let checkpoint_id = workspace_checkpoint_id(&db, &workspace_id)?;
+    let run = run_shell_command(
+        &workspace_id,
+        &cwd,
+        &script,
+        "run",
+        "Run script",
+        checkpoint_id.as_deref(),
+    )?;
     let log_path = write_lifecycle_log(&workspace_id, "run", &run.output)?;
     db.execute(
         "UPDATE workspaces SET run_log_path = ?2, updated_at = ?3 WHERE id = ?1",
@@ -1159,9 +1179,28 @@ fn run_terminal_command(
 ) -> Result<TerminalRun, String> {
     let db = state.db.lock().map_err(|err| err.to_string())?;
     let cwd = workspace_path(&db, &workspace_id)?;
-    let run = run_shell_command(&workspace_id, &cwd, &command)?;
+    let checkpoint_id = workspace_checkpoint_id(&db, &workspace_id)?;
+    let label = command_label(&command);
+    let run = run_shell_command(
+        &workspace_id,
+        &cwd,
+        &command,
+        "command",
+        &label,
+        checkpoint_id.as_deref(),
+    )?;
     store_terminal_run(&db, &run)?;
     Ok(run)
+}
+
+#[tauri::command]
+fn list_pulse_evidence(
+    workspace_id: String,
+    limit: i64,
+    state: State<AppState>,
+) -> Result<Vec<TerminalRun>, String> {
+    let db = state.db.lock().map_err(|err| err.to_string())?;
+    list_pulse_evidence_for_db(&db, &workspace_id, limit)
 }
 
 #[tauri::command]
@@ -2104,10 +2143,13 @@ fn init_db(db: &Connection) -> anyhow::Result<()> {
         CREATE TABLE IF NOT EXISTS terminal_sessions (
             id TEXT PRIMARY KEY,
             workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL DEFAULT 'command',
+            label TEXT NOT NULL DEFAULT '',
             command TEXT NOT NULL,
             cwd TEXT NOT NULL,
             output TEXT NOT NULL,
             exit_code INTEGER,
+            checkpoint_id TEXT,
             started_at INTEGER NOT NULL,
             ended_at INTEGER NOT NULL
         );
@@ -2144,6 +2186,14 @@ fn init_db(db: &Connection) -> anyhow::Result<()> {
     add_column_if_missing(db, "workspaces", "setup_log_path", "TEXT")?;
     add_column_if_missing(db, "workspaces", "run_log_path", "TEXT")?;
     add_column_if_missing(db, "workspaces", "archive_commit", "TEXT")?;
+    add_column_if_missing(
+        db,
+        "terminal_sessions",
+        "kind",
+        "TEXT NOT NULL DEFAULT 'command'",
+    )?;
+    add_column_if_missing(db, "terminal_sessions", "label", "TEXT NOT NULL DEFAULT ''")?;
+    add_column_if_missing(db, "terminal_sessions", "checkpoint_id", "TEXT")?;
     Ok(())
 }
 
@@ -2495,7 +2545,14 @@ fn load_query_context(db: &Connection, session_id: &str) -> Result<QueryContext,
     .ok_or_else(|| "session not found".to_string())
 }
 
-fn run_shell_command(workspace_id: &str, cwd: &str, command: &str) -> Result<TerminalRun, String> {
+fn run_shell_command(
+    workspace_id: &str,
+    cwd: &str,
+    command: &str,
+    kind: &str,
+    label: &str,
+    checkpoint_id: Option<&str>,
+) -> Result<TerminalRun, String> {
     let started_at = now_ms();
     let output = Command::new("/bin/zsh")
         .arg("-lc")
@@ -2516,10 +2573,16 @@ fn run_shell_command(workspace_id: &str, cwd: &str, command: &str) -> Result<Ter
     Ok(TerminalRun {
         id: Uuid::new_v4().to_string(),
         workspace_id: workspace_id.to_string(),
+        kind: normalized_pulse_kind(kind).to_string(),
+        label: pulse_label(kind, label, command),
         command: command.to_string(),
         cwd: cwd.to_string(),
         output: combined,
         exit_code: output.status.code(),
+        checkpoint_id: checkpoint_id
+            .map(str::to_string)
+            .filter(|id| !id.is_empty()),
+        duration_ms: ended_at.saturating_sub(started_at),
         started_at,
         ended_at,
     })
@@ -2527,21 +2590,101 @@ fn run_shell_command(workspace_id: &str, cwd: &str, command: &str) -> Result<Ter
 
 fn store_terminal_run(db: &Connection, run: &TerminalRun) -> Result<(), String> {
     db.execute(
-        "INSERT INTO terminal_sessions (id, workspace_id, command, cwd, output, exit_code, started_at, ended_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO terminal_sessions (id, workspace_id, kind, label, command, cwd, output, exit_code, checkpoint_id, started_at, ended_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             run.id,
             run.workspace_id,
+            run.kind,
+            run.label,
             run.command,
             run.cwd,
             run.output,
             run.exit_code,
+            run.checkpoint_id,
             run.started_at,
             run.ended_at
         ],
     )
     .map_err(|err| err.to_string())?;
     Ok(())
+}
+
+fn list_pulse_evidence_for_db(
+    db: &Connection,
+    workspace_id: &str,
+    limit: i64,
+) -> Result<Vec<TerminalRun>, String> {
+    let limit = limit.clamp(1, 50);
+    let mut stmt = db
+        .prepare(
+            "SELECT id, workspace_id, kind, label, command, cwd, output, exit_code, checkpoint_id, started_at, ended_at
+             FROM terminal_sessions
+             WHERE workspace_id = ?1
+             ORDER BY ended_at DESC, started_at DESC
+             LIMIT ?2",
+        )
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map(params![workspace_id, limit], |row| {
+            let started_at = row.get::<_, i64>(9)?;
+            let ended_at = row.get::<_, i64>(10)?;
+            let kind = normalized_pulse_kind(&row.get::<_, String>(2)?).to_string();
+            let command = row.get::<_, String>(4)?;
+            let label = pulse_label(&kind, &row.get::<_, String>(3)?, &command);
+            Ok(TerminalRun {
+                id: row.get(0)?,
+                workspace_id: row.get(1)?,
+                kind,
+                label,
+                command,
+                cwd: row.get(5)?,
+                output: row.get(6)?,
+                exit_code: row.get(7)?,
+                checkpoint_id: row.get(8)?,
+                duration_ms: ended_at.saturating_sub(started_at),
+                started_at,
+                ended_at,
+            })
+        })
+        .map_err(|err| err.to_string())?;
+    let mut runs = Vec::new();
+    for row in rows {
+        runs.push(row.map_err(|err| err.to_string())?);
+    }
+    Ok(runs)
+}
+
+fn normalized_pulse_kind(kind: &str) -> &'static str {
+    match kind {
+        "setup" => "setup",
+        "run" => "run",
+        _ => "command",
+    }
+}
+
+fn pulse_label(kind: &str, label: &str, command: &str) -> String {
+    let label = label.trim();
+    if !label.is_empty() {
+        return label.to_string();
+    }
+    match normalized_pulse_kind(kind) {
+        "setup" => "Setup script".to_string(),
+        "run" => "Run script".to_string(),
+        _ => command_label(command),
+    }
+}
+
+fn command_label(command: &str) -> String {
+    let first_line = command
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("Command");
+    let mut label = first_line.trim().to_string();
+    if label.chars().count() > 72 {
+        label = label.chars().take(69).collect::<String>() + "...";
+    }
+    label
 }
 
 fn upsert_pty_terminal_snapshot(db: &Connection, info: &PtyTerminalInfo) -> Result<(), String> {
@@ -3186,6 +3329,17 @@ fn workspace_path(db: &Connection, workspace_id: &str) -> Result<String, String>
         "SELECT path FROM workspaces WHERE id = ?1",
         params![workspace_id],
         |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|err| err.to_string())?
+    .ok_or_else(|| "workspace not found".to_string())
+}
+
+fn workspace_checkpoint_id(db: &Connection, workspace_id: &str) -> Result<Option<String>, String> {
+    db.query_row(
+        "SELECT checkpoint_id FROM workspaces WHERE id = ?1",
+        params![workspace_id],
+        |row| row.get::<_, Option<String>>(0),
     )
     .optional()
     .map_err(|err| err.to_string())?
@@ -4448,6 +4602,7 @@ pub fn run() {
             save_workspace_checkpoint,
             get_workspace_diff,
             run_terminal_command,
+            list_pulse_evidence,
             list_workspace_files,
             read_workspace_file,
             reveal_workspace_file,
@@ -4762,7 +4917,14 @@ index ce01362..cc628cc 100644
         let (setup_cwd, setup_script) = workspace_script(&db, "workspace-1", "setup_script")?;
         assert_eq!(setup_cwd, cwd);
         assert_eq!(setup_script, "echo SETUP_OK");
-        let setup_run = run_shell_command("workspace-1", &setup_cwd, &setup_script)?;
+        let setup_run = run_shell_command(
+            "workspace-1",
+            &setup_cwd,
+            &setup_script,
+            "setup",
+            "Setup script",
+            None,
+        )?;
         assert_eq!(setup_run.exit_code, Some(0));
         assert!(setup_run.output.contains("SETUP_OK"));
         let setup_log = write_lifecycle_log("workspace-1", "setup", &setup_run.output)?;
@@ -4770,7 +4932,7 @@ index ce01362..cc628cc 100644
         store_terminal_run(&db, &setup_run)?;
 
         let (_, run_script) = workspace_script(&db, "workspace-1", "run_script")?;
-        let run = run_shell_command("workspace-1", &cwd, &run_script)?;
+        let run = run_shell_command("workspace-1", &cwd, &run_script, "run", "Run script", None)?;
         assert_eq!(run.exit_code, Some(0));
         assert!(run.output.contains("RUN_OK"));
         store_terminal_run(&db, &run)?;
@@ -4779,6 +4941,55 @@ index ce01362..cc628cc 100644
             row.get(0)
         })?;
         assert_eq!(count, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn pulse_evidence_keeps_kind_label_checkpoint_and_recency(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = Connection::open_in_memory()?;
+        init_db(&db)?;
+        let now = now_ms();
+        let cwd = std::env::temp_dir().display().to_string();
+        db.execute(
+            "INSERT INTO repos (id, name, path, setup_script, run_script, run_script_mode, created_at, updated_at)
+             VALUES ('repo-1', 'repo', ?1, 'echo SETUP_OK', 'echo RUN_OK', 'concurrent', ?2, ?2)",
+            params![cwd, now],
+        )?;
+        db.execute(
+            "INSERT INTO workspaces (id, repo_id, name, path, state, checkpoint_id, created_at, updated_at)
+             VALUES ('workspace-1', 'repo-1', 'workspace', ?1, 'active', 'checkpoint-1', ?2, ?2)",
+            params![cwd, now],
+        )?;
+
+        let setup = run_shell_command(
+            "workspace-1",
+            &cwd,
+            "echo SETUP_OK",
+            "setup",
+            "Setup script",
+            Some("checkpoint-1"),
+        )?;
+        store_terminal_run(&db, &setup)?;
+        std::thread::sleep(Duration::from_millis(2));
+        let run = run_shell_command(
+            "workspace-1",
+            &cwd,
+            "echo RUN_OK",
+            "run",
+            "Run script",
+            Some("checkpoint-1"),
+        )?;
+        store_terminal_run(&db, &run)?;
+
+        let evidence = list_pulse_evidence_for_db(&db, "workspace-1", 10)?;
+        assert_eq!(evidence.len(), 2);
+        assert_eq!(evidence[0].kind, "run");
+        assert_eq!(evidence[0].label, "Run script");
+        assert_eq!(evidence[0].checkpoint_id.as_deref(), Some("checkpoint-1"));
+        assert!(evidence[0].duration_ms >= 0);
+        assert!(evidence[0].output.contains("RUN_OK"));
+        assert_eq!(evidence[1].kind, "setup");
         Ok(())
     }
 

@@ -19,6 +19,7 @@ let pending = false;
 let launchHealth = null;
 let lastDiff = "";
 let terminalRun = null;
+let pulseEvidence = [];
 let ptyTerminals = [];
 let selectedTerminalId = "";
 let ptyPoller = null;
@@ -1072,11 +1073,13 @@ function renderRunPanel(repo, workspace) {
         <button class="${activeRunTab === "setup" ? "active" : ""}" data-run-tab="setup">Setup</button>
         <button class="${activeRunTab === "run" ? "active" : ""}" data-run-tab="run">Run</button>
         <button class="${activeRunTab === "terminal" ? "active" : ""}" data-run-tab="terminal">Terminal</button>
+        <button class="${activeRunTab === "evidence" ? "active" : ""}" data-run-tab="evidence">Evidence</button>
         <button data-action-click="start-pty" ${workspace ? "" : "disabled"}>+</button>
       </div>
       ${activeRunTab === "setup" ? renderSetupTab(repo, workspace) : ""}
       ${activeRunTab === "run" ? renderRunTab(repo, workspace) : ""}
       ${activeRunTab === "terminal" ? renderTerminalTab(workspace, currentTerminal) : ""}
+      ${activeRunTab === "evidence" ? renderPulseEvidenceTab(workspace) : ""}
     </div>
   `;
 }
@@ -1196,6 +1199,45 @@ function renderTerminalTab(workspace, terminal) {
   `;
 }
 
+function renderPulseEvidenceTab(workspace) {
+  if (!workspace) {
+    return `<div class="panel-empty run-empty">Create a workspace before collecting Pulse evidence</div>`;
+  }
+  if (!pulseEvidence.length) {
+    return `
+      <div class="panel-empty run-empty">
+        <span>No Pulse evidence yet</span>
+      </div>
+    `;
+  }
+  return `
+    <div class="pulse-evidence">
+      ${pulseEvidence.map(renderPulseEvidenceRow).join("")}
+    </div>
+  `;
+}
+
+function renderPulseEvidenceRow(run) {
+  const tone = run.exitCode === 0 ? "success" : "failure";
+  const output = trimOutput(run.output, 900);
+  return `
+    <article class="pulse-row ${tone}">
+      <header>
+        <span class="pulse-kind">${escapeHtml(pulseKindLabel(run.kind))}</span>
+        <strong>${escapeHtml(run.label || run.command || "Pulse")}</strong>
+        <em>${escapeHtml(run.exitCode === 0 ? "passed" : `exit ${run.exitCode ?? "signal"}`)}</em>
+      </header>
+      <div class="pulse-meta">
+        <span>${escapeHtml(relativeTime(run.endedAt))}</span>
+        <span>${escapeHtml(formatDuration(run.durationMs))}</span>
+        <code>${escapeHtml(shortPath(run.cwd))}</code>
+        ${run.checkpointId ? `<code>${escapeHtml(run.checkpointId)}</code>` : ""}
+      </div>
+      <pre>${escapeHtml(`$ ${run.command}\n${output}`)}</pre>
+    </article>
+  `;
+}
+
 function currentPtyTerminal() {
   if (!ptyTerminals.length) return null;
   return ptyTerminals.find((terminal) => terminal.id === selectedTerminalId) ?? ptyTerminals[0];
@@ -1211,6 +1253,7 @@ function renderCommandPalette() {
     ["diff", "Show diff", "Compare workspace against checkpoint"],
     ["run-setup", "Run setup", "Execute repository setup script"],
     ["run-script", "Run script", "Execute repository run script"],
+    ["pulse-evidence", "Pulse evidence", "Review recent validation evidence"],
     ["open-workspace", "Open workspace", "Open this workspace in Finder"],
     ["open-repo", "Open repository", "Open the root repository in Finder"],
     ["repo-settings", "Repo settings", "Open repository details and branch info"],
@@ -1290,6 +1333,10 @@ async function runCommandAction(action) {
   if (action === "diff") return showDiff();
   if (action === "run-setup") return runWorkspaceSetup();
   if (action === "run-script") return runWorkspaceScript();
+  if (action === "pulse-evidence") {
+    activeRunTab = "evidence";
+    return render();
+  }
   if (action === "open-workspace") return openWorkspaceInFinder();
   if (action === "open-repo") return openRepoInFinder();
   if (action === "repo-settings") return openCurrentRepoSettings();
@@ -2112,6 +2159,7 @@ async function refreshWorkspacePanels() {
     selectedDiffPath = "";
     changeFilter = "";
     prInfo = null;
+    pulseEvidence = [];
     workspaceInitInfo = null;
     ptyTerminals = [];
     selectedTerminalId = "";
@@ -2119,13 +2167,14 @@ async function refreshWorkspacePanels() {
     return;
   }
   const session = currentSession();
-  [files, changes, diffFiles, diffComments, prInfo, contextUsage] = await Promise.all([
+  [files, changes, diffFiles, diffComments, prInfo, contextUsage, pulseEvidence] = await Promise.all([
     invoke("list_workspace_files", { workspaceId: workspace.id }).catch(() => []),
     invoke("list_workspace_changes", { workspaceId: workspace.id }).catch(() => []),
     invoke("get_workspace_patch", { workspaceId: workspace.id }).catch(() => []),
     invoke("list_diff_comments", { workspaceId: workspace.id }).catch(() => []),
     invoke("get_pull_request_info", { workspaceId: workspace.id }).catch((error) => ({ error: String(error), checks: [] })),
-    session ? invoke("get_context_usage", { sessionId: session.id }).catch(() => null) : Promise.resolve(null)
+    session ? invoke("get_context_usage", { sessionId: session.id }).catch(() => null) : Promise.resolve(null),
+    invoke("list_pulse_evidence", { workspaceId: workspace.id, limit: 12 }).catch(() => [])
   ]);
   workspaceInitInfo = await invoke("workspace_init", { workspaceId: workspace.id }).catch(() => null);
   ptyTerminals = await invoke("list_pty_terminals", { workspaceId: workspace.id }).catch(() => []);
@@ -2673,6 +2722,28 @@ function formatCheckDuration(startedAt, completedAt) {
   const minutes = Math.floor(seconds / 60);
   const remainder = seconds % 60;
   return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+}
+
+function pulseKindLabel(kind) {
+  if (kind === "setup") return "Setup";
+  if (kind === "run") return "Run";
+  return "Command";
+}
+
+function formatDuration(ms) {
+  const value = Number(ms || 0);
+  if (value < 1000) return `${Math.max(0, Math.round(value))}ms`;
+  const seconds = Math.round(value / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+}
+
+function trimOutput(output, limit) {
+  const value = String(output || "").trimEnd();
+  if (value.length <= limit) return value;
+  return `${value.slice(0, limit).trimEnd()}\n...`;
 }
 
 function renderChangesPanel() {
