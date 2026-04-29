@@ -46,8 +46,8 @@ Loomen should grow as a code-evolution instrument: local-first, evidence-rich, v
 
 ## Sever Without Regret
 
-- Add safer archive cleanup with optional branch/worktree deletion.
-- Add cleanup previews that show exactly which branch, worktree path, logs, terminal snapshots, and database records will be affected.
+- Add safer archive cleanup execution with optional branch/worktree deletion.
+- Add cleanup confirmation that reuses the preview and requires explicit final consent.
 - Add restore checks that verify the worktree path and branch still exist.
 - Add stale workspace nudges instead of automatic deletion.
 - Keep destructive actions explicit and reversible until the final cleanup step.

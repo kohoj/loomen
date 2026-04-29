@@ -48,6 +48,8 @@ let pendingSessionId = null;
 let lastError = "";
 let prInfo = null;
 let prModalOpen = false;
+let severPreview = null;
+let severPreviewOpen = false;
 let workspaceInitInfo = null;
 let commandPaletteOpen = false;
 let paletteQuery = "";
@@ -473,6 +475,7 @@ function render() {
               <button class="compact-action" title="Show diff" aria-label="Show diff" data-action-click="diff" ${workspace ? "" : "disabled"}>Diff</button>
               <button class="compact-action" title="Archive workspace" aria-label="Archive workspace" data-action-click="archive" ${workspace && workspace.state !== "archived" ? "" : "disabled"}>Archive</button>
               <button class="compact-action" title="Restore workspace" aria-label="Restore workspace" data-action-click="restore" ${workspace?.state === "archived" ? "" : "disabled"}>Restore</button>
+              <button class="compact-action" title="Preview Sever cleanup" aria-label="Preview Sever cleanup" data-action-click="sever-preview" ${workspace ? "" : "disabled"}>Sever</button>
               <button class="compact-action primary-action" title="New Claude chat" aria-label="New Claude chat" data-action-click="new-claude" ${workspace ? "" : "disabled"}>Claude</button>
               <button class="compact-action" title="New Codex chat" aria-label="New Codex chat" data-action-click="new-codex" ${workspace ? "" : "disabled"}>Codex</button>
             </div>
@@ -546,6 +549,7 @@ function render() {
     </main>
     ${renderCommandPalette()}
     ${renderPrCreateModal()}
+    ${renderSeverPreviewModal()}
     ${renderToolApprovalModal()}
   `;
 
@@ -699,6 +703,7 @@ function bindEvents() {
   bindActionClicks("diff", showDiff);
   bindActionClicks("archive", archiveCurrentWorkspace);
   bindActionClicks("restore", restoreCurrentWorkspace);
+  bindActionClicks("sever-preview", openSeverPreview);
   bindActionClicks("run-setup", runWorkspaceSetup);
   bindActionClicks("run-script", runWorkspaceScript);
   bindActionClicks("start-spotlight", startSpotlight);
@@ -920,6 +925,10 @@ function bindEvents() {
   document.querySelector('[data-action="create-pr"]')?.addEventListener("submit", createPullRequest);
   bindActionClicks("close-pr-modal", () => {
     prModalOpen = false;
+    render();
+  });
+  bindActionClicks("close-sever-preview", () => {
+    severPreviewOpen = false;
     render();
   });
 }
@@ -1285,6 +1294,7 @@ function renderCommandPalette() {
     ["run-script", "Run script", "Execute repository run script"],
     ["pulse-evidence", "Pulse evidence", "Review recent validation evidence"],
     ["fuse-readiness", "Fuse readiness", "Review evidence before merging"],
+    ["sever-preview", "Sever preview", "Preview cleanup before deleting anything"],
     ["open-workspace", "Open workspace", "Open this workspace in Finder"],
     ["open-repo", "Open repository", "Open the root repository in Finder"],
     ["repo-settings", "Repo settings", "Open repository details and branch info"],
@@ -1378,6 +1388,7 @@ async function runCommandAction(action) {
     activeRightPanel = "checks";
     return render();
   }
+  if (action === "sever-preview") return openSeverPreview();
   if (action === "open-workspace") return openWorkspaceInFinder();
   if (action === "open-repo") return openRepoInFinder();
   if (action === "repo-settings") return openCurrentRepoSettings();
@@ -2015,6 +2026,54 @@ function renderPrCreateModal() {
   `;
 }
 
+function renderSeverPreviewModal() {
+  if (!severPreviewOpen || !severPreview) return "";
+  const rows = [
+    ["Workspace", severPreview.workspaceName],
+    ["State", severPreview.state],
+    ["Branch", severPreview.branchName || "not recorded"],
+    ["Branch exists", severPreview.branchExists === null || severPreview.branchExists === undefined ? "unknown" : severPreview.branchExists ? "yes" : "no"],
+    ["Worktree", `${severPreview.worktreeExists ? "exists" : "missing"} · ${severPreview.worktreePath}`],
+    ["Setup log", severPreview.setupLogPath ? `${severPreview.hasSetupLog ? "exists" : "missing"} · ${severPreview.setupLogPath}` : "not recorded"],
+    ["Run log", severPreview.runLogPath ? `${severPreview.hasRunLog ? "exists" : "missing"} · ${severPreview.runLogPath}` : "not recorded"],
+    ["Archive commit", severPreview.archiveCommit || "not recorded"],
+    ["Database records", `${severPreview.databaseRecordCount} total`]
+  ];
+  const counts = [
+    ["Sessions", severPreview.sessionCount],
+    ["Pulse records", severPreview.terminalRunCount],
+    ["Terminal tabs", severPreview.terminalTabCount],
+    ["Diff comments", severPreview.diffCommentCount]
+  ];
+  return `
+    <div class="modal-backdrop">
+      <section class="approval-modal sever-modal">
+        <header>
+          <strong>Sever cleanup preview</strong>
+          <span>${escapeHtml(severPreview.state || "workspace")}</span>
+        </header>
+        <div class="approval-body">
+          <p class="modal-note">Preview only. No branch, worktree, log, or database record will be removed here.</p>
+          ${
+            severPreview.warnings?.length
+              ? `<div class="sever-warnings">${severPreview.warnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join("")}</div>`
+              : ""
+          }
+          <div class="sever-grid">
+            ${rows.map(([label, value]) => `<small>${escapeHtml(label)}</small><code>${escapeHtml(value)}</code>`).join("")}
+          </div>
+          <div class="sever-counts">
+            ${counts.map(([label, value]) => `<article><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></article>`).join("")}
+          </div>
+        </div>
+        <footer>
+          <button type="button" data-action-click="close-sever-preview">Close</button>
+        </footer>
+      </section>
+    </div>
+  `;
+}
+
 function defaultPrBody(workspace, isEditing = false) {
   if (isEditing) return "Updated from Loomen.";
   const changeSummary = changes.length
@@ -2203,6 +2262,8 @@ async function refreshWorkspacePanels() {
     pulseEvidence = [];
     namedPulses = [];
     pendingPulseId = "";
+    severPreview = null;
+    severPreviewOpen = false;
     workspaceInitInfo = null;
     ptyTerminals = [];
     selectedTerminalId = "";
@@ -2210,7 +2271,7 @@ async function refreshWorkspacePanels() {
     return;
   }
   const session = currentSession();
-  [files, changes, diffFiles, diffComments, prInfo, contextUsage, pulseEvidence, namedPulses] = await Promise.all([
+  [files, changes, diffFiles, diffComments, prInfo, contextUsage, pulseEvidence, namedPulses, severPreview] = await Promise.all([
     invoke("list_workspace_files", { workspaceId: workspace.id }).catch(() => []),
     invoke("list_workspace_changes", { workspaceId: workspace.id }).catch(() => []),
     invoke("get_workspace_patch", { workspaceId: workspace.id }).catch(() => []),
@@ -2218,7 +2279,8 @@ async function refreshWorkspacePanels() {
     invoke("get_pull_request_info", { workspaceId: workspace.id }).catch((error) => ({ error: String(error), checks: [] })),
     session ? invoke("get_context_usage", { sessionId: session.id }).catch(() => null) : Promise.resolve(null),
     invoke("list_pulse_evidence", { workspaceId: workspace.id, limit: 12 }).catch(() => []),
-    invoke("list_named_pulses", { workspaceId: workspace.id }).catch(() => [])
+    invoke("list_named_pulses", { workspaceId: workspace.id }).catch(() => []),
+    invoke("preview_sever_cleanup", { workspaceId: workspace.id }).catch(() => null)
   ]);
   workspaceInitInfo = await invoke("workspace_init", { workspaceId: workspace.id }).catch(() => null);
   ptyTerminals = await invoke("list_pty_terminals", { workspaceId: workspace.id }).catch(() => []);
@@ -2311,6 +2373,18 @@ async function restoreCurrentWorkspace() {
   snapshot = await invoke("restore_workspace", { workspaceId: workspace.id });
   selectFallbacks();
   await refreshWorkspacePanels();
+  render();
+}
+
+async function openSeverPreview() {
+  const workspace = currentWorkspace();
+  if (!workspace) return;
+  severPreview = await invoke("preview_sever_cleanup", { workspaceId: workspace.id }).catch((error) => {
+    lastError = String(error);
+    pushNotification("Sever preview failed", lastError, "error");
+    return null;
+  });
+  if (severPreview) severPreviewOpen = true;
   render();
 }
 

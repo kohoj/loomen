@@ -15,7 +15,7 @@ Loomen is a Tauri 2 app with a Rust backend, a static WebView frontend, SQLite p
 - **Beam** a session: watch Claude Code or Codex stream through a path with messages, events, and approvals.
 - **Pulse** validation: run named test/build/lint/type-check pulses, setup scripts, shell commands, and future multi-workspace checks.
 - **Fuse** through review: checkpoint, inspect, comment, publish PRs, follow checks, and prepare a path for merge.
-- **Sever** with care: archive, restore, and eventually clean up branches and worktrees only when the user chooses.
+- **Sever** with care: archive, restore, preview cleanup impact, and eventually clean up branches and worktrees only when the user chooses.
 
 These words are not decorative labels. They are the operating verbs of a code-evolution instrument: create paths, illuminate them, observe their live flow, test them, bring the worthy ones home, and stop carrying the rest.
 
@@ -27,7 +27,7 @@ These words are not decorative labels. They are the operating verbs of a code-ev
 - Ray workspace state through file trees, safe previews, search, structured patches, hunk navigation, line comments, Finder actions, PR status, and check state.
 - Pulse named validation actions, setup scripts, run scripts, one-off shell commands, PTY-backed zsh terminals, and recent validation evidence per workspace.
 - Fuse work through non-destructive checkpoint refs under `refs/loomen-checkpoints/<id>`, diff review, comments, readiness snapshots, draft PR creation/update, and check reruns.
-- Sever work through archive/restore flows today, with more explicit branch and worktree cleanup planned.
+- Sever work through archive/restore flows and cleanup previews that show branch, worktree, logs, terminal evidence, comments, sessions, and database impact before any deletion exists.
 - Keep per-workspace scratchpad notes, local notifications, settings, command palette entries, slash commands, and `@file` suggestions.
 
 ## Requirements

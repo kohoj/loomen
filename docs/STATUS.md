@@ -60,6 +60,7 @@ The implementation is already past the CLI prototype stage. It is a local deskto
 
 - Workspace archive and restore state.
 - Archive metadata storage.
+- Cleanup preview for branch, worktree, lifecycle logs, terminal evidence, terminal tabs, sessions, diff comments, and database record counts.
 - Conservative cleanup posture: destructive branch/worktree deletion is not automatic.
 
 ### Foundation
@@ -74,8 +75,7 @@ The implementation is already past the CLI prototype stage. It is a local deskto
 - The Rust command layer and frontend entrypoint are still large single files; the implementation is functional but wants module boundaries.
 - Interactive agent questions are acknowledged but currently skipped rather than rendered as first-class UI.
 - Sidecar diagnostics and restart behavior need to be more explicit.
-- Merge/archive cleanup is intentionally conservative and still needs a complete, conflict-aware flow.
-- Sever does not yet offer a full cleanup preview for branch deletion and `git worktree remove`.
+- Merge/archive cleanup is intentionally conservative and still needs an execution flow for branch deletion and `git worktree remove`.
 - `dist/` is checked in intentionally for Tauri, but generated source maps and native build output should stay out of git.
 
 ## Verification

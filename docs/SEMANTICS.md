@@ -108,7 +108,7 @@ Meaning: stop carrying a path.
 
 User-facing body: archive, restore, cleanup previews, and optional branch/worktree deletion.
 
-Engineering body: workspace state, archive metadata, future git branch deletion, future `git worktree remove`, database updates.
+Engineering body: workspace state, archive metadata, cleanup previews, future git branch deletion, future `git worktree remove`, database updates.
 
 Restraint: Sever should be explicit and reversible until the user chooses destructive cleanup.
 

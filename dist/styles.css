@@ -2068,6 +2068,72 @@ button.file-row.active {
   font-size: 12px;
 }
 
+.sever-modal {
+  width: min(720px, calc(100vw - 48px));
+}
+
+.sever-warnings {
+  display: grid;
+  gap: 6px;
+}
+
+.sever-warnings span {
+  border: 1px solid #604239;
+  border-radius: 6px;
+  background: #251916;
+  padding: 7px 9px;
+  color: #dfb39f;
+}
+
+.sever-grid {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 7px 10px;
+  border: 1px solid #302927;
+  border-radius: 6px;
+  background: #120f0f;
+  padding: 10px;
+}
+
+.sever-grid small {
+  color: #7f746f;
+  font-size: 11px;
+}
+
+.sever-grid code {
+  overflow: hidden;
+  color: #c8beb7;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sever-counts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.sever-counts article {
+  display: grid;
+  gap: 3px;
+  border: 1px solid #302927;
+  border-radius: 6px;
+  background: #120f0f;
+  padding: 9px;
+}
+
+.sever-counts strong {
+  color: #e4d9d1;
+  font-size: 16px;
+}
+
+.sever-counts span {
+  color: #8f8580;
+  font-size: 11px;
+}
+
 .approval-modal footer {
   justify-content: flex-end;
   border-top: 1px solid #302927;
