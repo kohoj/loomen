@@ -75,12 +75,13 @@ The implementation is already past the CLI prototype stage. It is a local deskto
 - Git root resolution, branch discovery, worktree creation, checkpoint refs, and checkpoint diffs are split into a dedicated Rust module.
 - Settings schema, default values, SQLite persistence, parser tolerance, and session defaults are split into a dedicated Rust module.
 - Database schema creation and compatibility migrations are split into a dedicated Rust module.
+- Repository/workspace/session/message snapshot hydration is split into a dedicated Rust read-model module.
 - Dark workbench UI with repository/history sidebar, workspace tabs, Scratchpad, chat sessions, command palette, notifications, composer controls, slash commands, and file mentions.
 - Settings pages for models, providers, appearance, git defaults, account placeholders, experiments, and advanced paths.
 
 ## Known Gaps
 
-- The Rust command layer and frontend entrypoint are still large; Pulse, terminal, review, GitHub, sidecar, Git, settings, and database schema now have module boundaries, while the remaining persistence queries and app bootstrap still need extraction.
+- The Rust command layer and frontend entrypoint are still large; Pulse, terminal, review, GitHub, sidecar, Git, settings, database schema, and snapshot read-model queries now have module boundaries, while remaining persistence commands and app bootstrap still need extraction.
 - Interactive agent questions are acknowledged but currently skipped rather than rendered as first-class UI.
 - Sidecar diagnostics and restart behavior need to be more explicit.
 - Merge/archive cleanup is intentionally conservative and still needs an execution flow for branch deletion and `git worktree remove`.
