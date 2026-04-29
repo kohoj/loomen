@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -128,6 +129,37 @@ struct Message {
 struct AppSnapshot {
     db_path: String,
     repos: Vec<Repo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchHealth {
+    status: String,
+    generated_at: i64,
+    db_path: String,
+    rebuild_root: String,
+    checks: Vec<LaunchHealthCheck>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchHealthCheck {
+    id: String,
+    label: String,
+    status: String,
+    detail: String,
+    path: Option<String>,
+    version: Option<String>,
+    required: bool,
+    remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LaunchExecutable {
+    path: Option<String>,
+    source: String,
+    problem: Option<String>,
+    checked_candidates: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -738,6 +770,92 @@ fn resolve_tool_approval(
 #[tauri::command]
 fn get_db_path(state: State<AppState>) -> String {
     state.db_path.display().to_string()
+}
+
+#[tauri::command]
+fn get_launch_health(state: State<AppState>) -> Result<LaunchHealth, String> {
+    let (settings, database_ok) = {
+        let db = state.db.lock().map_err(|err| err.to_string())?;
+        let database_ok = db
+            .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+            .is_ok();
+        let settings = load_settings(&db).map_err(|err| err.to_string())?;
+        (settings, database_ok)
+    };
+
+    let mut checks = Vec::new();
+    checks.push(path_health_check(
+        "database",
+        "SQLite database",
+        &state.db_path,
+        true,
+        database_ok,
+        "Local state is readable.",
+        "Loomen opened the database path but could not read from it.",
+        "Check file permissions or move the database out of a restricted directory.",
+    ));
+    checks.push(path_health_check(
+        "rebuildRoot",
+        "Rebuild root",
+        &state.rebuild_root,
+        true,
+        state.rebuild_root.exists(),
+        "Application source root is visible.",
+        "The rebuild root path is missing.",
+        "Run Loomen from a complete checkout.",
+    ));
+    checks.push(command_health_check(
+        "git",
+        "Git",
+        "git",
+        &["--version"],
+        true,
+        "Install Git and keep it on PATH.",
+    ));
+    checks.push(command_health_check(
+        "bun",
+        "Bun",
+        "bun",
+        &["--version"],
+        true,
+        "Install Bun and keep it on PATH so the sidecar can start.",
+    ));
+    checks.push(command_health_check(
+        "gh",
+        "GitHub CLI",
+        "gh",
+        &["--version"],
+        false,
+        "Install gh and run gh auth login to enable PR and checks features.",
+    ));
+    checks.push(agent_health_check(
+        "claude",
+        "Claude Code",
+        "claude",
+        &settings.claude_executable_path,
+        "LOOMEN_CLAUDE_BIN",
+        "Set Claude Code executable path in Advanced settings or LOOMEN_CLAUDE_BIN.",
+    ));
+    checks.push(agent_health_check(
+        "codex",
+        "Codex",
+        "codex",
+        &settings.codex_executable_path,
+        "LOOMEN_CODEX_BIN",
+        "Set Codex executable path in Advanced settings or LOOMEN_CODEX_BIN.",
+    ));
+    {
+        let mut sidecar = state.sidecar.lock().map_err(|err| err.to_string())?;
+        checks.push(sidecar_launch_health(&mut sidecar));
+    }
+
+    Ok(LaunchHealth {
+        status: launch_health_status(&checks),
+        generated_at: now_ms(),
+        db_path: state.db_path.display().to_string(),
+        rebuild_root: state.rebuild_root.display().to_string(),
+        checks,
+    })
 }
 
 #[tauri::command]
@@ -3126,6 +3244,301 @@ fn file_kind(path: &str) -> String {
     }
 }
 
+fn launch_health_status(checks: &[LaunchHealthCheck]) -> String {
+    if checks.iter().any(|check| check.status == "error") {
+        "error".to_string()
+    } else if checks.iter().any(|check| check.status == "warning") {
+        "warning".to_string()
+    } else {
+        "ok".to_string()
+    }
+}
+
+fn path_health_check(
+    id: &str,
+    label: &str,
+    path: &Path,
+    required: bool,
+    ok: bool,
+    ok_detail: &str,
+    error_detail: &str,
+    remediation: &str,
+) -> LaunchHealthCheck {
+    LaunchHealthCheck {
+        id: id.to_string(),
+        label: label.to_string(),
+        status: if ok { "ok" } else { "error" }.to_string(),
+        detail: if ok { ok_detail } else { error_detail }.to_string(),
+        path: Some(path.display().to_string()),
+        version: None,
+        required,
+        remediation: if ok {
+            None
+        } else {
+            Some(remediation.to_string())
+        },
+    }
+}
+
+fn command_health_check(
+    id: &str,
+    label: &str,
+    command: &str,
+    version_args: &[&str],
+    required: bool,
+    remediation: &str,
+) -> LaunchHealthCheck {
+    let path_value = std::env::var_os("PATH").and_then(|value| value.into_string().ok());
+    let resolved = resolve_launch_executable("", None, path_value.as_deref(), command);
+    executable_health_check(
+        id,
+        label,
+        command,
+        required,
+        remediation,
+        resolved,
+        version_args,
+    )
+}
+
+fn agent_health_check(
+    id: &str,
+    label: &str,
+    command: &str,
+    configured_path: &str,
+    env_key: &str,
+    remediation: &str,
+) -> LaunchHealthCheck {
+    let env_value = std::env::var(env_key).ok();
+    let path_value = std::env::var_os("PATH").and_then(|value| value.into_string().ok());
+    let resolved = resolve_launch_executable(
+        configured_path,
+        env_value.as_deref(),
+        path_value.as_deref(),
+        command,
+    );
+    executable_health_check(id, label, command, false, remediation, resolved, &[])
+}
+
+fn executable_health_check(
+    id: &str,
+    label: &str,
+    command: &str,
+    required: bool,
+    remediation: &str,
+    resolved: LaunchExecutable,
+    version_args: &[&str],
+) -> LaunchHealthCheck {
+    let status = if resolved.problem.is_some() {
+        if required {
+            "error"
+        } else {
+            "warning"
+        }
+    } else {
+        "ok"
+    };
+    let version = if status == "ok" {
+        resolved
+            .path
+            .as_deref()
+            .and_then(|path| command_version(path, version_args))
+    } else {
+        None
+    };
+    LaunchHealthCheck {
+        id: id.to_string(),
+        label: label.to_string(),
+        status: status.to_string(),
+        detail: resolved.problem.unwrap_or_else(|| {
+            format!(
+                "{} resolved from {}.",
+                command,
+                resolved.source.to_lowercase()
+            )
+        }),
+        path: resolved.path,
+        version,
+        required,
+        remediation: if status == "ok" {
+            None
+        } else {
+            Some(remediation.to_string())
+        },
+    }
+}
+
+fn resolve_launch_executable(
+    configured_path: &str,
+    env_value: Option<&str>,
+    path_env: Option<&str>,
+    command: &str,
+) -> LaunchExecutable {
+    let mut checked_candidates = Vec::new();
+    let mut problems = Vec::new();
+
+    if let Some(result) = candidate_launch_executable(
+        "settings",
+        Some(configured_path),
+        &mut checked_candidates,
+        &mut problems,
+    ) {
+        return result;
+    }
+    if let Some(result) = candidate_launch_executable(
+        "environment",
+        env_value,
+        &mut checked_candidates,
+        &mut problems,
+    ) {
+        return result;
+    }
+    if let Some(path) = find_executable_in_path(command, path_env) {
+        checked_candidates.push(format!("PATH:{}", path.display()));
+        return LaunchExecutable {
+            path: Some(path.display().to_string()),
+            source: "PATH".to_string(),
+            problem: None,
+            checked_candidates,
+        };
+    }
+    problems.push(format!("{command} not found on PATH"));
+    LaunchExecutable {
+        path: None,
+        source: "PATH".to_string(),
+        problem: Some(problems.join("; ")),
+        checked_candidates,
+    }
+}
+
+fn candidate_launch_executable(
+    source: &str,
+    value: Option<&str>,
+    checked_candidates: &mut Vec<String>,
+    problems: &mut Vec<String>,
+) -> Option<LaunchExecutable> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty())?;
+    let path = PathBuf::from(expand_tilde(value));
+    checked_candidates.push(format!("{source}:{}", path.display()));
+    if !path.exists() {
+        problems.push(format!("{} from {source} does not exist", path.display()));
+        return None;
+    }
+    if !is_executable_file(&path) {
+        return Some(LaunchExecutable {
+            path: Some(path.display().to_string()),
+            source: source.to_string(),
+            problem: Some(format!(
+                "{} from {source} is not executable",
+                path.display()
+            )),
+            checked_candidates: checked_candidates.clone(),
+        });
+    }
+    Some(LaunchExecutable {
+        path: Some(path.display().to_string()),
+        source: source.to_string(),
+        problem: None,
+        checked_candidates: checked_candidates.clone(),
+    })
+}
+
+fn find_executable_in_path(command: &str, path_env: Option<&str>) -> Option<PathBuf> {
+    let path_env = path_env?;
+    std::env::split_paths(path_env).find_map(|dir| {
+        let candidate = dir.join(command);
+        if is_executable_file(&candidate) {
+            Some(candidate)
+        } else {
+            None
+        }
+    })
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    path.metadata()
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+fn command_version(path: &str, args: &[&str]) -> Option<String> {
+    if args.is_empty() {
+        return None;
+    }
+    let output = Command::new(path).args(args).output().ok()?;
+    let text = if output.stdout.is_empty() {
+        String::from_utf8_lossy(&output.stderr)
+    } else {
+        String::from_utf8_lossy(&output.stdout)
+    };
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+fn sidecar_launch_health(sidecar: &mut Option<SidecarProcess>) -> LaunchHealthCheck {
+    match sidecar.as_mut() {
+        None => LaunchHealthCheck {
+            id: "sidecar".to_string(),
+            label: "Sidecar".to_string(),
+            status: "ok".to_string(),
+            detail: "Sidecar is idle and will start when Beam or workspace init needs it."
+                .to_string(),
+            path: None,
+            version: None,
+            required: true,
+            remediation: None,
+        },
+        Some(process) => match process.child.try_wait() {
+            Ok(None) if process.socket_path.exists() => LaunchHealthCheck {
+                id: "sidecar".to_string(),
+                label: "Sidecar".to_string(),
+                status: "ok".to_string(),
+                detail: "Sidecar process is running and the socket exists.".to_string(),
+                path: Some(process.socket_path.display().to_string()),
+                version: None,
+                required: true,
+                remediation: None,
+            },
+            Ok(None) => LaunchHealthCheck {
+                id: "sidecar".to_string(),
+                label: "Sidecar".to_string(),
+                status: "error".to_string(),
+                detail: "Sidecar process is running but its socket is missing.".to_string(),
+                path: Some(process.socket_path.display().to_string()),
+                version: None,
+                required: true,
+                remediation: Some(
+                    "Restart the sidecar by starting a new Beam session.".to_string(),
+                ),
+            },
+            Ok(Some(status)) => LaunchHealthCheck {
+                id: "sidecar".to_string(),
+                label: "Sidecar".to_string(),
+                status: "error".to_string(),
+                detail: format!("Sidecar exited with status {status}."),
+                path: Some(process.socket_path.display().to_string()),
+                version: None,
+                required: true,
+                remediation: Some(
+                    "Check Bun and sidecar/index.ts, then start a new Beam session.".to_string(),
+                ),
+            },
+            Err(err) => LaunchHealthCheck {
+                id: "sidecar".to_string(),
+                label: "Sidecar".to_string(),
+                status: "error".to_string(),
+                detail: format!("Could not inspect sidecar process: {err}"),
+                path: Some(process.socket_path.display().to_string()),
+                version: None,
+                required: true,
+                remediation: Some("Restart Loomen or start a new Beam session.".to_string()),
+            },
+        },
+    }
+}
+
 fn spotlighter_path() -> PathBuf {
     rebuild_root().join("script").join("spotlighter.sh")
 }
@@ -3874,6 +4287,7 @@ pub fn run() {
             get_context_usage,
             resolve_tool_approval,
             get_db_path,
+            get_launch_health,
             sidecar_status,
             workspace_init,
             claude_auth_status,
@@ -3922,6 +4336,133 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn resolves_launch_executable_precedence_and_path_search(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp_root = std::env::temp_dir().join(format!("loomen-health-{}", Uuid::new_v4()));
+        let bin_dir = temp_root.join("bin");
+        std::fs::create_dir_all(&bin_dir)?;
+        let codex = bin_dir.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\necho codex\n")?;
+        let mut permissions = std::fs::metadata(&codex)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&codex, permissions)?;
+        let stale_settings = temp_root.join("missing-codex");
+
+        let from_settings = resolve_launch_executable(
+            codex.to_str().unwrap(),
+            Some("/missing/env/codex"),
+            Some(""),
+            "codex",
+        );
+        assert_eq!(from_settings.source, "settings");
+        assert_eq!(from_settings.path.as_deref(), codex.to_str());
+        assert!(from_settings.problem.is_none());
+
+        let from_env = resolve_launch_executable(
+            stale_settings.to_str().unwrap(),
+            Some(codex.to_str().unwrap()),
+            Some(""),
+            "codex",
+        );
+        assert_eq!(from_env.source, "environment");
+        assert_eq!(from_env.path.as_deref(), codex.to_str());
+        assert!(from_env
+            .checked_candidates
+            .iter()
+            .any(|candidate| candidate.starts_with("settings:")));
+
+        let from_path =
+            resolve_launch_executable("", None, Some(bin_dir.to_str().unwrap()), "codex");
+        assert_eq!(from_path.source, "PATH");
+        assert_eq!(from_path.path.as_deref(), codex.to_str());
+
+        let missing = resolve_launch_executable("", None, Some(""), "codex");
+        assert_eq!(missing.source, "PATH");
+        assert!(missing.path.is_none());
+        assert!(missing.problem.unwrap().contains("not found"));
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+        Ok(())
+    }
+
+    #[test]
+    fn launch_executable_blocks_non_executable_existing_override(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp_root = std::env::temp_dir().join(format!("loomen-health-{}", Uuid::new_v4()));
+        let bin_dir = temp_root.join("bin");
+        std::fs::create_dir_all(&bin_dir)?;
+        let non_executable = temp_root.join("codex");
+        std::fs::write(&non_executable, "#!/bin/sh\necho blocked\n")?;
+        let fallback = bin_dir.join("codex");
+        std::fs::write(&fallback, "#!/bin/sh\necho fallback\n")?;
+        let mut permissions = std::fs::metadata(&fallback)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fallback, permissions)?;
+
+        let resolved = resolve_launch_executable(
+            non_executable.to_str().unwrap(),
+            Some(fallback.to_str().unwrap()),
+            Some(bin_dir.to_str().unwrap()),
+            "codex",
+        );
+        assert_eq!(resolved.source, "settings");
+        assert_eq!(resolved.path.as_deref(), non_executable.to_str());
+        assert!(resolved.problem.unwrap().contains("not executable"));
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+        Ok(())
+    }
+
+    #[test]
+    fn sidecar_idle_is_a_healthy_lazy_start_state() {
+        let mut sidecar = None;
+        let check = sidecar_launch_health(&mut sidecar);
+        assert_eq!(check.status, "ok");
+        assert!(check.detail.contains("idle"));
+        assert!(check.remediation.is_none());
+    }
+
+    #[test]
+    fn launch_health_status_prefers_errors_then_warnings() {
+        let mut checks = vec![LaunchHealthCheck {
+            id: "git".to_string(),
+            label: "Git".to_string(),
+            status: "ok".to_string(),
+            detail: "available".to_string(),
+            path: None,
+            version: None,
+            required: true,
+            remediation: None,
+        }];
+        assert_eq!(launch_health_status(&checks), "ok");
+
+        checks.push(LaunchHealthCheck {
+            id: "claude".to_string(),
+            label: "Claude Code".to_string(),
+            status: "warning".to_string(),
+            detail: "not configured".to_string(),
+            path: None,
+            version: None,
+            required: false,
+            remediation: Some("Set a path in Advanced settings.".to_string()),
+        });
+        assert_eq!(launch_health_status(&checks), "warning");
+
+        checks.push(LaunchHealthCheck {
+            id: "bun".to_string(),
+            label: "Bun".to_string(),
+            status: "error".to_string(),
+            detail: "not found".to_string(),
+            path: None,
+            version: None,
+            required: true,
+            remediation: Some("Install Bun and keep it on PATH.".to_string()),
+        });
+        assert_eq!(launch_health_status(&checks), "error");
+    }
 
     #[test]
     fn creates_real_git_worktree_and_checkpoint_ref() -> Result<(), Box<dyn std::error::Error>> {
