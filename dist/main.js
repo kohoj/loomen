@@ -14,7 +14,7 @@ let setupScriptEditorOpen = false;
 let collapsedFileDirs = new Set();
 let notificationsOpen = false;
 let pending = false;
-let sidecarPath = "";
+let launchHealth = null;
 let lastDiff = "";
 let terminalRun = null;
 let ptyTerminals = [];
@@ -79,8 +79,11 @@ async function listen(event, handler) {
 
 async function load() {
   await setupEventListeners();
-  [snapshot, settings] = await Promise.all([invoke("get_state"), invoke("get_settings")]);
-  sidecarPath = await invoke("sidecar_status").catch((error) => `unavailable: ${error}`);
+  [snapshot, settings, launchHealth] = await Promise.all([
+    invoke("get_state"),
+    invoke("get_settings"),
+    invoke("get_launch_health").catch(fallbackLaunchHealth)
+  ]);
   selectFallbacks();
   await refreshWorkspacePanels();
   render();
@@ -247,6 +250,32 @@ function notificationItems() {
 
 function notificationBadgeCount() {
   return notificationItems().filter((item) => item.tone === "error" || item.tone === "warning" || item.id === "pending-query").length;
+}
+
+function fallbackLaunchHealth(error) {
+  return {
+    status: "error",
+    generatedAt: Date.now(),
+    dbPath: snapshot.dbPath || "",
+    rebuildRoot: "",
+    checks: [
+      {
+        id: "launchHealth",
+        label: "Launch health",
+        status: "error",
+        detail: String(error),
+        path: null,
+        version: null,
+        required: true,
+        remediation: "Restart Loomen or inspect the Tauri command logs."
+      }
+    ]
+  };
+}
+
+async function refreshLaunchHealth() {
+  launchHealth = await invoke("get_launch_health").catch(fallbackLaunchHealth);
+  render();
 }
 
 function render() {
@@ -1112,6 +1141,7 @@ function renderCommandPalette() {
     ["open-workspace", "Open workspace", "Open this workspace in Finder"],
     ["open-repo", "Open repository", "Open the root repository in Finder"],
     ["repo-settings", "Repo settings", "Open repository details and branch info"],
+    ["launch-health", "Launch health", "Ray local runtime dependencies"],
     ["settings", "Settings", "Open Loomen-style settings"]
   ];
   const query = paletteQuery.trim().toLowerCase();
@@ -1190,6 +1220,12 @@ async function runCommandAction(action) {
   if (action === "open-workspace") return openWorkspaceInFinder();
   if (action === "open-repo") return openRepoInFinder();
   if (action === "repo-settings") return openCurrentRepoSettings();
+  if (action === "launch-health") {
+    settingsTab = "health";
+    view = "settings";
+    await refreshLaunchHealth();
+    return;
+  }
   if (action === "settings") {
     view = "settings";
     return render();
@@ -1295,6 +1331,7 @@ function renderSettings() {
         <button class="${settingsTab === "git" ? "active" : ""}" data-settings-tab="git">Git</button>
         <button class="${settingsTab === "account" ? "active" : ""}" data-settings-tab="account">Account</button>
         <div class="settings-heading">More</div>
+        <button class="${settingsTab === "health" ? "active" : ""}" data-settings-tab="health">Health</button>
         <button class="${settingsTab === "experimental" ? "active" : ""}" data-settings-tab="experimental">Experimental</button>
         <button class="${settingsTab === "advanced" ? "active" : ""}" data-settings-tab="advanced">Advanced</button>
         <div class="settings-heading">Repositories</div>
@@ -1374,6 +1411,8 @@ function sum(a, b) { return a + b; }</pre>
         ${settingsSwitch("enterpriseDataPrivacy", "Enterprise data privacy", "Disable features that require external AI providers or cloud-only integrations.", s.enterpriseDataPrivacy)}
         ${settingsSwitch("claudeToolApprovals", "Claude Code tool approvals", "Require manual approval before agents can run tools.", s.claudeToolApprovals)}
       `;
+    case "health":
+      return renderLaunchHealthPanel();
     case "experimental":
       return `
         <h1>Experimental</h1>
@@ -1407,6 +1446,51 @@ function sum(a, b) { return a + b; }</pre>
         ${settingsSwitch("expandToolCalls", "Don't collapse tool calls", "Show all tool calls expanded by default.", s.expandToolCalls)}
       `;
   }
+}
+
+function renderLaunchHealthPanel() {
+  const health = launchHealth || fallbackLaunchHealth("Launch health has not loaded yet.");
+  const generated = health.generatedAt ? new Date(health.generatedAt).toLocaleTimeString() : "not yet";
+  return `
+    <h1>Launch Health</h1>
+    <p class="settings-intro">Ray the local runtime before work begins: Git, Bun, agent CLIs, GitHub CLI, database path, rebuild root, and sidecar socket state.</p>
+    <section class="health-summary ${escapeAttr(health.status || "warning")}">
+      <div>
+        <strong>${escapeHtml(healthStatusTitle(health.status))}</strong>
+        <span>Last checked ${escapeHtml(generated)}</span>
+      </div>
+      <button type="button" data-action-click="refresh-launch-health">Refresh</button>
+    </section>
+    <section class="health-grid">
+      ${(health.checks || []).map(renderHealthCheck).join("")}
+    </section>
+  `;
+}
+
+function renderHealthCheck(check) {
+  const status = check.status || "warning";
+  const meta = [
+    check.required ? "required" : "optional",
+    check.version,
+    check.path
+  ].filter(Boolean);
+  return `
+    <article class="health-check ${escapeAttr(status)}">
+      <header>
+        <span>${escapeHtml(status)}</span>
+        <strong>${escapeHtml(check.label || check.id || "Check")}</strong>
+      </header>
+      <p>${escapeHtml(check.detail || "")}</p>
+      ${meta.length ? `<code>${escapeHtml(meta.join(" · "))}</code>` : ""}
+      ${check.remediation ? `<em>${escapeHtml(check.remediation)}</em>` : ""}
+    </article>
+  `;
+}
+
+function healthStatusTitle(status) {
+  if (status === "ok") return "All required runtime checks are clear";
+  if (status === "error") return "Runtime attention needed";
+  return "Runtime mostly ready, with notes";
 }
 
 function renderRepoSettingsPanel(repoId) {
@@ -1485,6 +1569,7 @@ function bindSettingsEvents() {
       render();
     });
   });
+  document.querySelector('[data-action-click="refresh-launch-health"]')?.addEventListener("click", refreshLaunchHealth);
   document.querySelector('[data-action="settings-form"]')?.addEventListener("submit", saveSettings);
   document.querySelector('[data-action="settings-form"]')?.addEventListener("change", saveSettings);
 }
