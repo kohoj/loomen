@@ -3,15 +3,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::{FromRawFd, RawFd};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
@@ -20,6 +17,11 @@ mod pulse;
 use pulse::{
     command_label, list_pulse_evidence_for_db, named_pulses_for_path, run_shell_command,
     store_terminal_run, NamedPulse, TerminalRun,
+};
+mod terminal;
+use terminal::{
+    delete_pty_terminal_snapshot, load_pty_terminal_snapshot, load_pty_terminal_snapshots,
+    spawn_pty_shell, terminal_info, upsert_pty_terminal_snapshot, PtySession, PtyTerminalInfo,
 };
 
 struct AppState {
@@ -42,15 +44,6 @@ impl Drop for SidecarProcess {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
-
-struct PtySession {
-    child: Child,
-    master: File,
-    output: Arc<Mutex<String>>,
-    workspace_id: String,
-    cwd: String,
-    started_at: i64,
 }
 
 struct SpotlighterProcess {
@@ -276,17 +269,6 @@ struct SeverCleanupPreview {
     diff_comment_count: i64,
     database_record_count: i64,
     warnings: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PtyTerminalInfo {
-    id: String,
-    workspace_id: String,
-    cwd: String,
-    output: String,
-    is_running: bool,
-    started_at: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1271,12 +1253,7 @@ fn start_pty_terminal(
     let id = Uuid::new_v4().to_string();
     let started_at = now_ms();
     let session = spawn_pty_shell(&workspace_id, &cwd, started_at)?;
-    let output = session.output.clone();
-    let reader = session
-        .master
-        .try_clone()
-        .map_err(|err| format!("failed to clone PTY master: {err}"))?;
-    std::thread::spawn(move || read_pty_output(reader, output));
+    session.start_output_reader()?;
 
     let info = PtyTerminalInfo {
         id: id.clone(),
@@ -1305,7 +1282,7 @@ fn list_pty_terminals(
     let mut terminals = Vec::new();
     let mut live_ids = Vec::new();
     for (id, session) in ptys.iter_mut() {
-        if session.workspace_id == workspace_id {
+        if session.workspace_id() == workspace_id {
             let info = terminal_info(id, session)?;
             live_ids.push(id.clone());
             terminals.push(info);
@@ -1336,11 +1313,7 @@ fn write_pty_terminal(
     let session = ptys
         .get_mut(&terminal_id)
         .ok_or_else(|| "terminal not found".to_string())?;
-    session
-        .master
-        .write_all(input.as_bytes())
-        .map_err(|err| err.to_string())?;
-    session.master.flush().map_err(|err| err.to_string())?;
+    session.write_input(&input)?;
     let info = terminal_info(&terminal_id, session)?;
     drop(ptys);
     let db = state.db.lock().map_err(|err| err.to_string())?;
@@ -1375,8 +1348,7 @@ fn stop_pty_terminal(
     let session = ptys
         .get_mut(&terminal_id)
         .ok_or_else(|| "terminal not found".to_string())?;
-    let _ = session.child.kill();
-    let _ = session.child.wait();
+    session.stop();
     let info = terminal_info(&terminal_id, session)?;
     drop(ptys);
     let db = state.db.lock().map_err(|err| err.to_string())?;
@@ -1388,8 +1360,7 @@ fn stop_pty_terminal(
 fn close_pty_terminal(terminal_id: String, state: State<AppState>) -> Result<(), String> {
     let mut ptys = state.ptys.lock().map_err(|err| err.to_string())?;
     if let Some(mut session) = ptys.remove(&terminal_id) {
-        let _ = session.child.kill();
-        let _ = session.child.wait();
+        session.stop();
     }
     drop(ptys);
     let db = state.db.lock().map_err(|err| err.to_string())?;
@@ -2703,95 +2674,6 @@ fn branch_exists_for_worktree(path: &str, branch: &str) -> Option<bool> {
         .map(|status| status.success())
 }
 
-fn upsert_pty_terminal_snapshot(db: &Connection, info: &PtyTerminalInfo) -> Result<(), String> {
-    db.execute(
-        "INSERT INTO pty_terminal_tabs (id, workspace_id, cwd, output, is_running, started_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(id) DO UPDATE SET
-            workspace_id = excluded.workspace_id,
-            cwd = excluded.cwd,
-            output = excluded.output,
-            is_running = excluded.is_running,
-            started_at = excluded.started_at,
-            updated_at = excluded.updated_at",
-        params![
-            info.id,
-            info.workspace_id,
-            info.cwd,
-            info.output,
-            if info.is_running { 1 } else { 0 },
-            info.started_at,
-            now_ms()
-        ],
-    )
-    .map_err(|err| err.to_string())?;
-    Ok(())
-}
-
-fn load_pty_terminal_snapshots(
-    db: &Connection,
-    workspace_id: &str,
-) -> Result<Vec<PtyTerminalInfo>, String> {
-    let mut stmt = db
-        .prepare(
-            "SELECT id, workspace_id, cwd, output, started_at
-             FROM pty_terminal_tabs
-             WHERE workspace_id = ?1
-             ORDER BY started_at ASC",
-        )
-        .map_err(|err| err.to_string())?;
-    let rows = stmt
-        .query_map(params![workspace_id], |row| {
-            Ok(PtyTerminalInfo {
-                id: row.get(0)?,
-                workspace_id: row.get(1)?,
-                cwd: row.get(2)?,
-                output: row.get(3)?,
-                is_running: false,
-                started_at: row.get(4)?,
-            })
-        })
-        .map_err(|err| err.to_string())?;
-    let mut terminals = Vec::new();
-    for row in rows {
-        terminals.push(row.map_err(|err| err.to_string())?);
-    }
-    Ok(terminals)
-}
-
-fn load_pty_terminal_snapshot(
-    db: &Connection,
-    terminal_id: &str,
-) -> Result<Option<PtyTerminalInfo>, String> {
-    db.query_row(
-        "SELECT id, workspace_id, cwd, output, started_at
-         FROM pty_terminal_tabs
-         WHERE id = ?1",
-        params![terminal_id],
-        |row| {
-            Ok(PtyTerminalInfo {
-                id: row.get(0)?,
-                workspace_id: row.get(1)?,
-                cwd: row.get(2)?,
-                output: row.get(3)?,
-                is_running: false,
-                started_at: row.get(4)?,
-            })
-        },
-    )
-    .optional()
-    .map_err(|err| err.to_string())
-}
-
-fn delete_pty_terminal_snapshot(db: &Connection, terminal_id: &str) -> Result<(), String> {
-    db.execute(
-        "DELETE FROM pty_terminal_tabs WHERE id = ?1",
-        params![terminal_id],
-    )
-    .map_err(|err| err.to_string())?;
-    Ok(())
-}
-
 fn write_lifecycle_log(workspace_id: &str, kind: &str, output: &str) -> Result<String, String> {
     let dir = std::env::temp_dir().join("loomen-lifecycle");
     std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
@@ -3135,111 +3017,6 @@ fn checkpoint_diff(worktree_path: &str, id: &str, mode: &str) -> Result<String, 
     } else {
         git_output(worktree_path, &["diff", &ref_name])
     }
-}
-
-fn spawn_pty_shell(workspace_id: &str, cwd: &str, started_at: i64) -> Result<PtySession, String> {
-    let mut master_fd: RawFd = -1;
-    let mut slave_fd: RawFd = -1;
-    let open_result = unsafe {
-        libc::openpty(
-            &mut master_fd,
-            &mut slave_fd,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    if open_result != 0 {
-        return Err(std::io::Error::last_os_error().to_string());
-    }
-
-    let stdin_fd = unsafe { libc::dup(slave_fd) };
-    let stdout_fd = unsafe { libc::dup(slave_fd) };
-    let stderr_fd = unsafe { libc::dup(slave_fd) };
-    if stdin_fd < 0 || stdout_fd < 0 || stderr_fd < 0 {
-        unsafe {
-            libc::close(master_fd);
-            libc::close(slave_fd);
-        }
-        return Err(std::io::Error::last_os_error().to_string());
-    }
-
-    let mut command = Command::new("/bin/zsh");
-    command
-        .arg("-il")
-        .current_dir(cwd)
-        .env("TERM", "xterm-256color")
-        .stdin(unsafe { Stdio::from_raw_fd(stdin_fd) })
-        .stdout(unsafe { Stdio::from_raw_fd(stdout_fd) })
-        .stderr(unsafe { Stdio::from_raw_fd(stderr_fd) });
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::ioctl(0, libc::TIOCSCTTY.into(), 0) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let child = command
-        .spawn()
-        .map_err(|err| format!("failed to spawn PTY shell: {err}"))?;
-    unsafe {
-        libc::close(slave_fd);
-    }
-    let master = unsafe { File::from_raw_fd(master_fd) };
-    Ok(PtySession {
-        child,
-        master,
-        output: Arc::new(Mutex::new(String::new())),
-        workspace_id: workspace_id.to_string(),
-        cwd: cwd.to_string(),
-        started_at,
-    })
-}
-
-fn read_pty_output(mut reader: File, output: Arc<Mutex<String>>) {
-    let mut buffer = [0u8; 4096];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => {
-                let chunk = String::from_utf8_lossy(&buffer[..n]);
-                if let Ok(mut out) = output.lock() {
-                    out.push_str(&chunk);
-                    let keep_from = out.len().saturating_sub(200_000);
-                    if keep_from > 0 {
-                        let trimmed = out[keep_from..].to_string();
-                        *out = trimmed;
-                    }
-                }
-            }
-            Err(_) => break,
-        }
-    }
-}
-
-fn terminal_info(id: &str, session: &mut PtySession) -> Result<PtyTerminalInfo, String> {
-    let is_running = match session.child.try_wait() {
-        Ok(Some(_)) => false,
-        Ok(None) => true,
-        Err(_) => false,
-    };
-    let output = session
-        .output
-        .lock()
-        .map_err(|err| err.to_string())?
-        .clone();
-    Ok(PtyTerminalInfo {
-        id: id.to_string(),
-        workspace_id: session.workspace_id.clone(),
-        cwd: session.cwd.clone(),
-        output,
-        is_running,
-        started_at: session.started_at,
-    })
 }
 
 fn parse_diff_files(raw: &str) -> Vec<DiffFile> {
@@ -4854,65 +4631,6 @@ index ce01362..cc628cc 100644
         assert_eq!(item.line, 42);
         assert_eq!(item.column, 7);
         assert_eq!(item.text, "fn search_workspace()");
-    }
-
-    #[test]
-    fn starts_pty_shell_and_captures_scrollback() -> Result<(), Box<dyn std::error::Error>> {
-        let cwd = std::env::temp_dir();
-        let mut session = spawn_pty_shell("workspace-test", cwd.to_str().unwrap(), now_ms())?;
-        let output = session.output.clone();
-        let reader = session.master.try_clone()?;
-        std::thread::spawn(move || read_pty_output(reader, output));
-
-        session.master.write_all(b"echo PTY_OK\nexit\n")?;
-        session.master.flush()?;
-        std::thread::sleep(std::time::Duration::from_millis(700));
-        let _ = session.child.wait();
-        let info = terminal_info("terminal-test", &mut session)?;
-        assert!(
-            info.output.contains("PTY_OK"),
-            "output was: {}",
-            info.output
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn pty_terminal_snapshots_rehydrate_scrollback() -> Result<(), Box<dyn std::error::Error>> {
-        let db = Connection::open_in_memory()?;
-        init_db(&db)?;
-        let now = now_ms();
-        db.execute(
-            "INSERT INTO repos (id, name, path, setup_script, run_script, run_script_mode, created_at, updated_at)
-             VALUES ('repo-1', 'repo', '/tmp', '', '', 'concurrent', ?1, ?1)",
-            params![now],
-        )?;
-        db.execute(
-            "INSERT INTO workspaces (id, repo_id, name, path, state, created_at, updated_at)
-             VALUES ('workspace-1', 'repo-1', 'workspace', '/tmp', 'active', ?1, ?1)",
-            params![now],
-        )?;
-        let info = PtyTerminalInfo {
-            id: "terminal-1".to_string(),
-            workspace_id: "workspace-1".to_string(),
-            cwd: "/tmp".to_string(),
-            output: "scrollback\nPTY_OK\n".to_string(),
-            is_running: true,
-            started_at: now,
-        };
-        upsert_pty_terminal_snapshot(&db, &info)?;
-
-        let snapshots = load_pty_terminal_snapshots(&db, "workspace-1")?;
-        assert_eq!(snapshots.len(), 1);
-        assert_eq!(snapshots[0].id, "terminal-1");
-        assert_eq!(snapshots[0].is_running, false);
-        assert!(snapshots[0].output.contains("PTY_OK"));
-
-        let single = load_pty_terminal_snapshot(&db, "terminal-1")?.expect("snapshot exists");
-        assert_eq!(single.cwd, "/tmp");
-        delete_pty_terminal_snapshot(&db, "terminal-1")?;
-        assert!(load_pty_terminal_snapshot(&db, "terminal-1")?.is_none());
-        Ok(())
     }
 
     #[test]
