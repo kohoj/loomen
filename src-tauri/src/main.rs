@@ -18,6 +18,11 @@ use pulse::{
     command_label, list_pulse_evidence_for_db, named_pulses_for_path, run_shell_command,
     store_terminal_run, NamedPulse, TerminalRun,
 };
+mod review;
+use review::{
+    add_diff_comment_for_db, add_diff_comment_from_params, list_diff_comments_for_db,
+    parse_diff_files, resolve_diff_comment_for_db, DiffComment, DiffFile, DiffOutput,
+};
 mod terminal;
 use terminal::{
     delete_pty_terminal_snapshot, load_pty_terminal_snapshot, load_pty_terminal_snapshots,
@@ -242,14 +247,6 @@ struct AppSettings {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DiffOutput {
-    workspace_id: String,
-    checkpoint_id: Option<String>,
-    diff: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct SeverCleanupPreview {
     workspace_id: String,
     workspace_name: String,
@@ -296,28 +293,6 @@ struct WorkspaceSearchMatch {
     line: usize,
     column: usize,
     text: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DiffFile {
-    path: String,
-    status: String,
-    additions: usize,
-    deletions: usize,
-    patch: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DiffComment {
-    id: String,
-    workspace_id: String,
-    file_path: String,
-    line_number: i64,
-    body: String,
-    is_resolved: bool,
-    created_at: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1937,14 +1912,7 @@ fn add_diff_comment(
     state: State<AppState>,
 ) -> Result<Vec<DiffComment>, String> {
     let db = state.db.lock().map_err(|err| err.to_string())?;
-    let id = Uuid::new_v4().to_string();
-    db.execute(
-        "INSERT INTO diff_comments (id, workspace_id, file_path, line_number, body, is_resolved, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
-        params![id, workspace_id, file_path, line_number, body, now_ms()],
-    )
-    .map_err(|err| err.to_string())?;
-    list_diff_comments_for_db(&db, &workspace_id)
+    add_diff_comment_for_db(&db, &workspace_id, &file_path, line_number, &body)
 }
 
 #[tauri::command]
@@ -1954,12 +1922,7 @@ fn resolve_diff_comment(
     state: State<AppState>,
 ) -> Result<Vec<DiffComment>, String> {
     let db = state.db.lock().map_err(|err| err.to_string())?;
-    db.execute(
-        "UPDATE diff_comments SET is_resolved = 1 WHERE id = ?1 AND workspace_id = ?2",
-        params![comment_id, workspace_id],
-    )
-    .map_err(|err| err.to_string())?;
-    list_diff_comments_for_db(&db, &workspace_id)
+    resolve_diff_comment_for_db(&db, &comment_id, &workspace_id)
 }
 
 #[tauri::command]
@@ -3019,104 +2982,6 @@ fn checkpoint_diff(worktree_path: &str, id: &str, mode: &str) -> Result<String, 
     }
 }
 
-fn parse_diff_files(raw: &str) -> Vec<DiffFile> {
-    let mut files = Vec::new();
-    let mut current_path = String::new();
-    let mut current_patch = Vec::new();
-    let mut additions = 0usize;
-    let mut deletions = 0usize;
-
-    let flush = |files: &mut Vec<DiffFile>,
-                 current_path: &mut String,
-                 current_patch: &mut Vec<String>,
-                 additions: &mut usize,
-                 deletions: &mut usize| {
-        if current_path.is_empty() {
-            return;
-        }
-        let status = if *additions > 0 && *deletions > 0 {
-            "modified"
-        } else if *additions > 0 {
-            "added"
-        } else if *deletions > 0 {
-            "deleted"
-        } else {
-            "changed"
-        };
-        files.push(DiffFile {
-            path: current_path.clone(),
-            status: status.to_string(),
-            additions: *additions,
-            deletions: *deletions,
-            patch: current_patch.join("\n"),
-        });
-        current_path.clear();
-        current_patch.clear();
-        *additions = 0;
-        *deletions = 0;
-    };
-
-    for line in raw.lines() {
-        if let Some(rest) = line.strip_prefix("diff --git ") {
-            flush(
-                &mut files,
-                &mut current_path,
-                &mut current_patch,
-                &mut additions,
-                &mut deletions,
-            );
-            let path = rest.split(" b/").nth(1).unwrap_or(rest).trim().to_string();
-            current_path = path;
-        }
-        if line.starts_with('+') && !line.starts_with("+++") {
-            additions += 1;
-        } else if line.starts_with('-') && !line.starts_with("---") {
-            deletions += 1;
-        }
-        if !current_path.is_empty() {
-            current_patch.push(line.to_string());
-        }
-    }
-    flush(
-        &mut files,
-        &mut current_path,
-        &mut current_patch,
-        &mut additions,
-        &mut deletions,
-    );
-    files
-}
-
-fn list_diff_comments_for_db(
-    db: &Connection,
-    workspace_id: &str,
-) -> Result<Vec<DiffComment>, String> {
-    let mut stmt = db
-        .prepare(
-            "SELECT id, workspace_id, file_path, line_number, body, is_resolved, created_at
-             FROM diff_comments WHERE workspace_id = ?1 ORDER BY created_at DESC",
-        )
-        .map_err(|err| err.to_string())?;
-    let rows = stmt
-        .query_map(params![workspace_id], |row| {
-            Ok(DiffComment {
-                id: row.get(0)?,
-                workspace_id: row.get(1)?,
-                file_path: row.get(2)?,
-                line_number: row.get(3)?,
-                body: row.get(4)?,
-                is_resolved: row.get::<_, i64>(5)? != 0,
-                created_at: row.get(6)?,
-            })
-        })
-        .map_err(|err| err.to_string())?;
-    let mut comments = Vec::new();
-    for row in rows {
-        comments.push(row.map_err(|err| err.to_string())?);
-    }
-    Ok(comments)
-}
-
 fn workspace_path(db: &Connection, workspace_id: &str) -> Result<String, String> {
     db.query_row(
         "SELECT path FROM workspaces WHERE id = ?1",
@@ -4069,43 +3934,10 @@ fn reverse_diff_comment(
 ) -> Result<Value, String> {
     let workspace_id = session_workspace_id(db, session_id)?;
     let params = request.get("params").unwrap_or(&Value::Null);
-    let file_path = params
-        .get("filePath")
-        .or_else(|| params.get("file_path"))
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
-    let line_number = params
-        .get("lineNumber")
-        .or_else(|| params.get("line_number"))
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let body = params
-        .get("body")
-        .or_else(|| params.get("comment"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if body.is_empty() {
-        return Err("diffComment body is empty".to_string());
-    }
-    db.execute(
-        "INSERT INTO diff_comments (id, workspace_id, file_path, line_number, body, is_resolved, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
-        params![
-            Uuid::new_v4().to_string(),
-            workspace_id,
-            file_path,
-            line_number,
-            body,
-            now_ms()
-        ],
-    )
-    .map_err(|err| err.to_string())?;
+    let comments = add_diff_comment_from_params(db, &workspace_id, params)?;
     Ok(serde_json::json!({
         "workspaceId": workspace_id,
-        "comments": list_diff_comments_for_db(db, &workspace_id)?
+        "comments": comments
     }))
 }
 
@@ -4603,25 +4435,6 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&temp_root);
         Ok(())
-    }
-
-    #[test]
-    fn parses_structured_diff_files() {
-        let raw = r#"diff --git a/README.md b/README.md
-index ce01362..cc628cc 100644
---- a/README.md
-+++ b/README.md
-@@ -1 +1,2 @@
--hello
-+hello
-+world
-"#;
-        let files = parse_diff_files(raw);
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].path, "README.md");
-        assert_eq!(files[0].additions, 2);
-        assert_eq!(files[0].deletions, 1);
-        assert!(files[0].patch.contains("@@ -1 +1,2 @@"));
     }
 
     #[test]
