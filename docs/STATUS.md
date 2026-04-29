@@ -70,12 +70,13 @@ The implementation is already past the CLI prototype stage. It is a local deskto
 - Pulse backend logic is split into a dedicated Rust module for named validation discovery, command execution, evidence storage, and labels.
 - PTY terminal lifecycle, scrollback capture, and terminal tab snapshots are split into a dedicated Rust module.
 - Diff review parsing and diff comment storage are split into a dedicated Rust module.
+- GitHub PR/check CLI operations and check-rollup parsing are split into a dedicated Rust module.
 - Dark workbench UI with repository/history sidebar, workspace tabs, Scratchpad, chat sessions, command palette, notifications, composer controls, slash commands, and file mentions.
 - Settings pages for models, providers, appearance, git defaults, account placeholders, experiments, and advanced paths.
 
 ## Known Gaps
 
-- The Rust command layer and frontend entrypoint are still large; Pulse, terminal, and review now have module boundaries, while the remaining domains still need extraction.
+- The Rust command layer and frontend entrypoint are still large; Pulse, terminal, review, and GitHub now have module boundaries, while the remaining domains still need extraction.
 - Interactive agent questions are acknowledged but currently skipped rather than rendered as first-class UI.
 - Sidecar diagnostics and restart behavior need to be more explicit.
 - Merge/archive cleanup is intentionally conservative and still needs an execution flow for branch deletion and `git worktree remove`.
