@@ -52,6 +52,7 @@ The implementation is already past the CLI prototype stage. It is a local deskto
 - Diff comments stored per workspace/file/line.
 - Draft PR creation and update through `gh pr create` and `gh pr edit`.
 - PR/check status reading through `gh`.
+- Fuse readiness snapshot that combines checkpoint presence, Pulse evidence, unresolved diff comments, and PR/check state.
 - Failed-check reruns through `gh run rerun --failed`.
 
 ### Sever

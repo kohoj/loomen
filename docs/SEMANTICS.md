@@ -98,7 +98,7 @@ Meaning: bring a proven path back home.
 
 User-facing body: checkpointing, diff review, comments, PR creation/update, check status, reruns, merge readiness, and future merge execution.
 
-Engineering body: `refs/loomen-checkpoints/<id>`, temporary git indexes, structured patch parsing, GitHub CLI calls, review comments, CI status.
+Engineering body: `refs/loomen-checkpoints/<id>`, temporary git indexes, structured patch parsing, GitHub CLI calls, review comments, Pulse evidence, CI status.
 
 Restraint: Fuse should not promise automatic semantic merging. It is a decision pipeline, not a magic merge button.
 

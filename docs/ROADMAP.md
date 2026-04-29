@@ -38,7 +38,7 @@ Loomen should grow as a code-evolution instrument: local-first, evidence-rich, v
 
 ## Fuse With Confidence
 
-- Add a merge readiness view that combines diff comments, test evidence, PR status, check results, terminal output, and unresolved risks.
+- Feed merge readiness from richer evidence sources such as unresolved risks, multi-workspace Pulse, and conflict previews.
 - Add conflict-aware merge previews before any target-branch mutation.
 - Add merge/automerge flows after PR success.
 - Add explicit handoff states: draft, ready for review, ready to fuse, fused.

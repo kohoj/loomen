@@ -1480,6 +1480,92 @@ button.file-row.active {
   color: #6f6661;
 }
 
+.fuse-readiness {
+  display: grid;
+  gap: 9px;
+  margin-bottom: 10px;
+  border: 1px solid #302927;
+  border-left-width: 3px;
+  border-radius: 6px;
+  background: #151110;
+  padding: 10px;
+}
+
+.fuse-readiness.ready {
+  border-left-color: #7aa06f;
+}
+
+.fuse-readiness.review {
+  border-left-color: #c59a5b;
+}
+
+.fuse-readiness.blocked {
+  border-left-color: #b66c59;
+}
+
+.fuse-readiness header {
+  display: grid;
+  gap: 3px;
+}
+
+.fuse-readiness header strong {
+  color: #e4d9d1;
+  font-size: 13px;
+}
+
+.fuse-readiness header span {
+  color: #8f8580;
+  font-size: 11px;
+}
+
+.fuse-readiness > div {
+  display: grid;
+  gap: 5px;
+}
+
+.readiness-item {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 104px) minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 24px;
+  color: #bdb4ae;
+  font-size: 11px;
+}
+
+.readiness-item span {
+  color: #a19690;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+
+.readiness-item.success span {
+  color: #8fc986;
+}
+
+.readiness-item.failure span {
+  color: #df8d7f;
+}
+
+.readiness-item.warning span {
+  color: #d4ae6f;
+}
+
+.readiness-item strong {
+  overflow: hidden;
+  color: #d8d0ca;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.readiness-item em {
+  overflow: hidden;
+  color: #8f8580;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .check-row {
   border-bottom: 1px solid #25201e;
   color: #cfc7c1;
