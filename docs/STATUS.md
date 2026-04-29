@@ -68,12 +68,13 @@ The implementation is already past the CLI prototype stage. It is a local deskto
 - Tauri 2 desktop shell with static WebView frontend.
 - Rust backend with command handlers for repositories, workspaces, sessions, files, diffs, terminals, PRs, settings, and sidecar lifecycle.
 - Pulse backend logic is split into a dedicated Rust module for named validation discovery, command execution, evidence storage, and labels.
+- PTY terminal lifecycle, scrollback capture, and terminal tab snapshots are split into a dedicated Rust module.
 - Dark workbench UI with repository/history sidebar, workspace tabs, Scratchpad, chat sessions, command palette, notifications, composer controls, slash commands, and file mentions.
 - Settings pages for models, providers, appearance, git defaults, account placeholders, experiments, and advanced paths.
 
 ## Known Gaps
 
-- The Rust command layer and frontend entrypoint are still large; Pulse has a first module boundary, while the remaining domains still need extraction.
+- The Rust command layer and frontend entrypoint are still large; Pulse and terminal now have module boundaries, while the remaining domains still need extraction.
 - Interactive agent questions are acknowledged but currently skipped rather than rendered as first-class UI.
 - Sidecar diagnostics and restart behavior need to be more explicit.
 - Merge/archive cleanup is intentionally conservative and still needs an execution flow for branch deletion and `git worktree remove`.
