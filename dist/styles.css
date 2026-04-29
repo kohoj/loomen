@@ -278,6 +278,71 @@ textarea {
   width: 100%;
 }
 
+.weave-preview {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #302927;
+  border-radius: 6px;
+  background: #1b1715;
+  padding: 10px;
+  color: #cfc7c1;
+}
+
+.weave-preview.muted {
+  color: #837a74;
+  font-size: 12px;
+}
+
+.weave-preview.blocked {
+  border-color: rgba(223, 141, 127, 0.48);
+}
+
+.weave-preview header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+.weave-preview header strong {
+  color: #e8ded6;
+  font-size: 12px;
+}
+
+.weave-preview header span {
+  color: #8fc986;
+  font-size: 11px;
+}
+
+.weave-preview.blocked header span,
+.weave-preview p {
+  color: #df8d7f;
+}
+
+.weave-preview div {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 5px 8px;
+}
+
+.weave-preview small {
+  color: #7d746e;
+  font-size: 11px;
+}
+
+.weave-preview code {
+  overflow: hidden;
+  color: #c7b7a9;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.weave-preview p {
+  margin: 0;
+  font-size: 12px;
+}
+
 .settings-entry {
   justify-content: flex-start;
   border-color: transparent;

@@ -100,6 +100,38 @@ struct Workspace {
     sessions: Vec<Session>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WeavePreview {
+    repo_id: String,
+    repo_path: String,
+    repo_name: String,
+    workspace_name: String,
+    branch_leaf: String,
+    branch_name: String,
+    base_branch: String,
+    worktree_path: String,
+    checkpoint_id: String,
+    path_exists: bool,
+    path_is_empty: bool,
+    can_create: bool,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspacePlan {
+    workspace_name: String,
+    branch_leaf: String,
+    branch_name: String,
+    base_branch: String,
+    worktree_path: String,
+    checkpoint_id: String,
+    path_exists: bool,
+    path_is_empty: bool,
+    can_create: bool,
+    warnings: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Session {
@@ -460,6 +492,46 @@ fn add_repo(path: String, state: State<AppState>) -> Result<AppSnapshot, String>
 }
 
 #[tauri::command]
+fn preview_workspace(
+    repo_id: String,
+    name: String,
+    path: String,
+    base_branch: Option<String>,
+    state: State<AppState>,
+) -> Result<WeavePreview, String> {
+    let db = state.db.lock().map_err(|err| err.to_string())?;
+    let settings = load_settings(&db).map_err(|err| err.to_string())?;
+    let (repo_path, repo_name, current_branch, default_branch) =
+        repo_workspace_context(&db, &repo_id)?;
+    let plan = build_workspace_plan(
+        &repo_path,
+        &repo_name,
+        current_branch.as_deref(),
+        default_branch.as_deref(),
+        &settings,
+        &name,
+        &path,
+        base_branch.as_deref(),
+        None,
+    );
+    Ok(WeavePreview {
+        repo_id,
+        repo_path,
+        repo_name,
+        workspace_name: plan.workspace_name,
+        branch_leaf: plan.branch_leaf,
+        branch_name: plan.branch_name,
+        base_branch: plan.base_branch,
+        worktree_path: plan.worktree_path,
+        checkpoint_id: plan.checkpoint_id,
+        path_exists: plan.path_exists,
+        path_is_empty: plan.path_is_empty,
+        can_create: plan.can_create,
+        warnings: plan.warnings,
+    })
+}
+
+#[tauri::command]
 fn create_workspace(
     repo_id: String,
     name: String,
@@ -469,57 +541,38 @@ fn create_workspace(
 ) -> Result<AppSnapshot, String> {
     let db = state.db.lock().map_err(|err| err.to_string())?;
     let settings = load_settings(&db).map_err(|err| err.to_string())?;
-    let (repo_path, repo_name, current_branch, default_branch) = db
-        .query_row(
-            "SELECT path, name, current_branch, default_branch FROM repos WHERE id = ?1",
-            params![repo_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|err| err.to_string())?
-        .ok_or_else(|| "repo not found".to_string())?;
+    let (repo_path, repo_name, current_branch, default_branch) =
+        repo_workspace_context(&db, &repo_id)?;
+    let plan = build_workspace_plan(
+        &repo_path,
+        &repo_name,
+        current_branch.as_deref(),
+        default_branch.as_deref(),
+        &settings,
+        &name,
+        &path,
+        base_branch.as_deref(),
+        None,
+    );
+    if !plan.can_create {
+        return Err(plan.warnings.join("; "));
+    }
 
-    let workspace_name = if name.trim().is_empty() {
-        "workspace"
-    } else {
-        name.trim()
-    };
-    let suffix = Uuid::new_v4().to_string()[..8].to_string();
-    let slug = slugify(workspace_name);
-    let branch_leaf = format!("{}-{}", slug, suffix);
-    let branch_name = workspace_branch_name(&repo_path, &settings, &branch_leaf);
-    let requested_base = base_branch
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let base_branch = requested_base
-        .or(current_branch.as_deref())
-        .or(default_branch.as_deref())
-        .unwrap_or("HEAD")
-        .to_string();
-    let worktree_path = if path.trim().is_empty() {
-        default_worktree_path(&settings, &repo_name, &branch_leaf)
-    } else {
-        expand_tilde(path.trim())
-    };
-
-    create_git_worktree(&repo_path, &worktree_path, &branch_name, &base_branch)?;
-    let checkpoint_id = save_checkpoint(&worktree_path, &format!("workspace-{}", suffix)).ok();
+    create_git_worktree(
+        &repo_path,
+        &plan.worktree_path,
+        &plan.branch_name,
+        &plan.base_branch,
+    )?;
+    let checkpoint_id = save_checkpoint(&plan.worktree_path, &plan.checkpoint_id).ok();
     ensure_workspace(
         &db,
         &repo_id,
-        workspace_name,
-        &worktree_path,
+        &plan.workspace_name,
+        &plan.worktree_path,
         "active",
-        Some(&branch_name),
-        Some(&base_branch),
+        Some(&plan.branch_name),
+        Some(&plan.base_branch),
         checkpoint_id.as_deref(),
         now_ms(),
     )?;
@@ -2731,6 +2784,86 @@ fn push_unique_branch(branches: &mut Vec<String>, branch: &str) {
     branches.push(branch.to_string());
 }
 
+fn repo_workspace_context(
+    db: &Connection,
+    repo_id: &str,
+) -> Result<(String, String, Option<String>, Option<String>), String> {
+    db.query_row(
+        "SELECT path, name, current_branch, default_branch FROM repos WHERE id = ?1",
+        params![repo_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(|err| err.to_string())?
+    .ok_or_else(|| "repo not found".to_string())
+}
+
+fn build_workspace_plan(
+    repo_path: &str,
+    repo_name: &str,
+    current_branch: Option<&str>,
+    default_branch: Option<&str>,
+    settings: &AppSettings,
+    name: &str,
+    path: &str,
+    base_branch: Option<&str>,
+    suffix: Option<&str>,
+) -> WorkspacePlan {
+    let workspace_name = non_empty(name.trim(), "workspace");
+    let suffix = suffix
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string()[..8].to_string());
+    let branch_leaf = format!("{}-{}", slugify(&workspace_name), suffix);
+    let branch_name = workspace_branch_name(repo_path, settings, &branch_leaf);
+    let requested_base = base_branch.map(str::trim).filter(|value| !value.is_empty());
+    let base_branch = requested_base
+        .or(current_branch)
+        .or(default_branch)
+        .unwrap_or("HEAD")
+        .to_string();
+    let worktree_path = if path.trim().is_empty() {
+        default_worktree_path(settings, repo_name, &branch_leaf)
+    } else {
+        expand_tilde(path.trim())
+    };
+    let checkpoint_id = format!("workspace-{suffix}");
+    let path_ref = Path::new(&worktree_path);
+    let path_exists = path_ref.exists();
+    let path_is_empty = if path_exists {
+        path_ref
+            .read_dir()
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false)
+    } else {
+        true
+    };
+    let mut warnings = Vec::new();
+    if path_exists && !path_is_empty {
+        warnings.push(format!("worktree path is not empty: {worktree_path}"));
+    }
+    WorkspacePlan {
+        workspace_name,
+        branch_leaf,
+        branch_name,
+        base_branch,
+        worktree_path,
+        checkpoint_id,
+        path_exists,
+        path_is_empty,
+        can_create: warnings.is_empty(),
+        warnings,
+    }
+}
+
 fn workspace_branch_name(repo_path: &str, settings: &AppSettings, branch_leaf: &str) -> String {
     let prefix = match settings.branch_prefix_type.as_str() {
         "none" => String::new(),
@@ -4278,6 +4411,7 @@ pub fn run() {
             open_workspace_in_finder,
             open_repo_in_finder,
             add_repo,
+            preview_workspace,
             create_workspace,
             create_session,
             close_session,
@@ -4819,6 +4953,79 @@ index ce01362..cc628cc 100644
         assert_eq!(info.checks.len(), 1);
         assert_eq!(info.checks[0].name, "test");
         assert_eq!(info.checks[0].conclusion.as_deref(), Some("SUCCESS"));
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_plan_reuses_suffix_and_reports_git_state() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let db = Connection::open_in_memory()?;
+        init_db(&db)?;
+        let settings = load_settings(&db)?;
+        let temp_root = std::env::temp_dir().join(format!("loomen-plan-{}", Uuid::new_v4()));
+        let repo = temp_root.join("repo");
+        std::fs::create_dir_all(&repo)?;
+
+        let plan = build_workspace_plan(
+            repo.to_str().unwrap(),
+            "repo",
+            Some("main"),
+            Some("main"),
+            &settings,
+            "Polish Launch Health",
+            "",
+            Some("feature/base"),
+            Some("abc12345"),
+        );
+
+        assert_eq!(plan.workspace_name, "Polish Launch Health");
+        assert_eq!(plan.branch_leaf, "polish-launch-health-abc12345");
+        assert!(plan.branch_name.ends_with("polish-launch-health-abc12345"));
+        assert_eq!(plan.base_branch, "feature/base");
+        assert_eq!(plan.checkpoint_id, "workspace-abc12345");
+        assert!(plan
+            .worktree_path
+            .ends_with("polish-launch-health-abc12345"));
+        assert!(plan.can_create);
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_plan_blocks_existing_non_empty_path() -> Result<(), Box<dyn std::error::Error>> {
+        let db = Connection::open_in_memory()?;
+        init_db(&db)?;
+        let settings = load_settings(&db)?;
+        let temp_root = std::env::temp_dir().join(format!("loomen-plan-{}", Uuid::new_v4()));
+        let repo = temp_root.join("repo");
+        let occupied = temp_root.join("occupied");
+        std::fs::create_dir_all(&repo)?;
+        std::fs::create_dir_all(&occupied)?;
+        std::fs::write(occupied.join("README.md"), "already here\n")?;
+
+        let plan = build_workspace_plan(
+            repo.to_str().unwrap(),
+            "repo",
+            Some("main"),
+            Some("main"),
+            &settings,
+            "",
+            occupied.to_str().unwrap(),
+            None,
+            Some("abc12345"),
+        );
+
+        assert_eq!(plan.workspace_name, "workspace");
+        assert!(plan.path_exists);
+        assert!(!plan.path_is_empty);
+        assert!(!plan.can_create);
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("not empty")));
+
+        let _ = std::fs::remove_dir_all(&temp_root);
         Ok(())
     }
 

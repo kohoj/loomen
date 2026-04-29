@@ -8,6 +8,8 @@ let view = "workbench";
 let settingsTab = "general";
 let addRepoOpen = false;
 let newWorkspaceOpen = false;
+let weavePreview = null;
+let weavePreviewKey = "";
 let activeMainTab = "chat";
 let runScriptEditorOpen = false;
 let setupScriptEditorOpen = false;
@@ -278,6 +280,31 @@ async function refreshLaunchHealth() {
   render();
 }
 
+function renderWeavePreview() {
+  if (!weavePreview) {
+    return `<div class="weave-preview muted">Weave preview appears after you name the workspace.</div>`;
+  }
+  const rows = [
+    ["Repository", weavePreview.repoName],
+    ["Base branch", weavePreview.baseBranch],
+    ["New branch", weavePreview.branchName],
+    ["Worktree path", weavePreview.worktreePath],
+    ["Checkpoint", weavePreview.checkpointId]
+  ];
+  return `
+    <section class="weave-preview ${weavePreview.canCreate ? "" : "blocked"}">
+      <header>
+        <strong>${weavePreview.canCreate ? "Ready to weave" : "Weave needs attention"}</strong>
+        <span>${weavePreview.pathExists ? (weavePreview.pathIsEmpty ? "path exists and is empty" : "path is occupied") : "path will be created"}</span>
+      </header>
+      <div>
+        ${rows.map(([label, value]) => `<small>${escapeHtml(label)}</small><code>${escapeHtml(value || "unknown")}</code>`).join("")}
+      </div>
+      ${(weavePreview.warnings || []).map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}
+    </section>
+  `;
+}
+
 function render() {
   if (view === "settings") {
     app.innerHTML = renderSettings();
@@ -330,10 +357,11 @@ function render() {
                 <input name="name" placeholder="Workspace name" ${repo ? "" : "disabled"} />
                 ${renderBaseBranchSelect(repo)}
                 <input name="path" placeholder="Optional worktree path" ${repo ? "" : "disabled"} />
-                <button type="submit" ${repo ? "" : "disabled"}>New workspace</button>
+                ${renderWeavePreview()}
+                <button type="submit" ${repo && (!weavePreview || weavePreview.canCreate) ? "" : "disabled"}>Weave workspace</button>
               </form>
             `
-            : `<button type="button" class="repo-add-row" data-action-click="toggle-new-workspace" ${repo ? "" : "disabled"}>New workspace from ${escapeHtml(repo?.currentBranch || repo?.defaultBranch || "HEAD")}</button>`
+            : `<button type="button" class="repo-add-row" data-action-click="toggle-new-workspace" ${repo ? "" : "disabled"}>Weave workspace from ${escapeHtml(repo?.currentBranch || repo?.defaultBranch || "HEAD")}</button>`
         }
         <div class="list compact workspace-quick-list">
           ${
@@ -418,7 +446,8 @@ function render() {
           <input name="name" placeholder="Workspace name" ${repo ? "" : "disabled"} />
           ${renderBaseBranchSelect(repo)}
           <input name="path" placeholder="Optional worktree path" ${repo ? "" : "disabled"} />
-          <button type="submit" ${repo ? "" : "disabled"}>Worktree</button>
+          ${renderWeavePreview()}
+          <button type="submit" ${repo && (!weavePreview || weavePreview.canCreate) ? "" : "disabled"}>Weave workspace</button>
         </form>
       </section>
 
@@ -599,10 +628,16 @@ function bindEvents() {
       baseBranch: form.get("baseBranch")?.toString().trim() || repo.currentBranch || repo.defaultBranch || "HEAD"
     });
     newWorkspaceOpen = false;
+    weavePreview = null;
+    weavePreviewKey = "";
     activeMainTab = "chat";
     selectFallbacks();
     await refreshWorkspacePanels();
     render();
+  });
+  document.querySelectorAll('[data-action="create-workspace"] input, [data-action="create-workspace"] select').forEach((element) => {
+    element.addEventListener("input", refreshWeavePreviewFromForm);
+    element.addEventListener("change", refreshWeavePreviewFromForm);
   });
 
   bindActionClicks("new-claude", () => newSession("claude"));
@@ -625,7 +660,14 @@ function bindEvents() {
   bindActionClicks("toggle-new-workspace", () => {
     newWorkspaceOpen = !newWorkspaceOpen;
     render();
-    if (newWorkspaceOpen) document.querySelector('[data-action="create-workspace"] input[name="name"]')?.focus();
+    if (newWorkspaceOpen) {
+      const nameInput = document.querySelector('[data-action="create-workspace"] input[name="name"]');
+      nameInput?.focus();
+      refreshWeavePreviewFromForm({ currentTarget: nameInput });
+    } else {
+      weavePreview = null;
+      weavePreviewKey = "";
+    }
   });
   bindActionClicks("open-palette", () => {
     paletteQuery = "";
@@ -886,6 +928,37 @@ function bindActionClicks(action, handler) {
   document.querySelectorAll(`[data-action-click="${action}"]`).forEach((button) => {
     button.addEventListener("click", handler);
   });
+}
+
+async function refreshWeavePreviewFromForm(event) {
+  const form = event.currentTarget?.form;
+  const repo = currentRepo();
+  if (!form || !repo) return;
+  const data = new FormData(form);
+  const name = data.get("name")?.toString().trim() || "workspace";
+  const path = data.get("path")?.toString().trim() || "";
+  const baseBranch = data.get("baseBranch")?.toString().trim() || repo.currentBranch || repo.defaultBranch || "HEAD";
+  const key = [repo.id, name, path, baseBranch].join("\n");
+  weavePreviewKey = key;
+  const preview = await invoke("preview_workspace", {
+    repoId: repo.id,
+    name,
+    path,
+    baseBranch
+  }).catch((error) => ({
+    canCreate: false,
+    repoName: repo.name,
+    baseBranch,
+    branchName: "unknown",
+    worktreePath: path || repo.path,
+    checkpointId: "unknown",
+    pathExists: false,
+    pathIsEmpty: false,
+    warnings: [String(error)]
+  }));
+  if (weavePreviewKey !== key) return;
+  weavePreview = preview;
+  render();
 }
 
 function renderEmptySession(workspace, repo) {
