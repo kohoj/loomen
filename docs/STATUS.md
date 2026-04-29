@@ -1,25 +1,79 @@
 # Status
 
-Loomen is currently a runnable macOS Tauri app with real local persistence and git operations.
+Loomen is currently a runnable macOS Tauri workbench with real local persistence, real git worktree operations, local agent execution, and a dense desktop review surface.
+
+The implementation is already past the CLI prototype stage. It is a local desktop app with a Rust backend, SQLite state, a static WebView frontend, PTY terminals, git operations, GitHub CLI integration, and a TypeScript sidecar for Claude Code / Codex execution.
 
 ## Implemented
 
-- Tauri 2 desktop shell with static WebView frontend.
-- SQLite tables for repositories, workspaces, sessions, messages, settings, terminal snapshots, lifecycle runs, and diff comments.
-- Real repository import through `git rev-parse`, remote/default-branch discovery, and branch enumeration.
-- Real workspace creation with `git worktree add` and configurable branch/worktree naming.
-- Non-destructive checkpoint commits written to `refs/loomen-checkpoints/<id>` through a temporary git index.
-- Claude and Codex CLI adapters in the TypeScript sidecar, selected by session agent type.
+### Weave
+
+- Local repository import through `git rev-parse`.
+- Remote/default-branch discovery and branch enumeration.
+- Workspace creation with real `git worktree add`.
+- Configurable branch naming and worktree path generation.
+- SQLite records for repositories, workspaces, sessions, messages, settings, terminal snapshots, lifecycle runs, and diff comments.
+- Initial non-destructive checkpoint refs for workspaces.
+
+### Ray
+
+- All-files inspector with collapsible tree navigation.
+- Safe file preview with binary detection, large-file truncation, line highlighting, copy/open/reveal actions, and Finder integration.
+- Workspace content search backed by command-line search.
+- Changes inspector with structured patch parsing, hunk navigation, additions/deletions summary, changed-file filtering, patch copy, Finder reveal, and line-aware diff comments.
+- GitHub PR/check panel through `gh pr view`, check rollup parsing, and check rerun support.
+- Approximate context usage surfaced for sessions.
+
+### Beam
+
+- Claude Code and Codex CLI adapters in the TypeScript sidecar.
+- Session agent type selection for Claude or Codex.
 - Newline-delimited JSON-RPC over a Unix domain socket between Rust and the sidecar.
-- Streaming assistant messages, session events, cancellation, and tool-approval prompts.
-- Reverse RPC handlers for diff, comments, terminal output, plan mode, user questions, and tool approval.
-- Settings pages for models, providers, appearance, git defaults, account placeholders, experiments, and advanced paths.
-- Dark workbench UI with repository/history sidebar, workspace tabs, Scratchpad, chat sessions, command palette, notifications, composer controls, slash commands, and file mentions.
-- All-files inspector with collapsible tree, workspace search, safe file preview, line highlighting, copy/open/reveal actions, binary detection, and large-file truncation.
-- Changes inspector with structured patch parsing, hunk navigation, additions/deletions summary, changed-file filter, patch copy, Finder reveal, and line-aware diff comments.
-- GitHub PR/check panel via `gh pr view`, `gh pr create`, `gh pr edit`, and `gh run rerun --failed`.
-- Setup/run scripts plus PTY-backed zsh terminal tabs with persisted scrollback snapshots.
+- Streaming assistant messages from agent output.
+- Forwarded session events for non-text tool/activity events.
+- Cancellation and tool-approval prompts.
+- Reverse RPC handlers for diff, comments, terminal output, plan mode exit, skipped interactive user questions, and tool approval.
+
+### Pulse
+
+- Repository setup scripts.
+- Repository run scripts.
+- One-off workspace shell command execution.
+- PTY-backed zsh terminal tabs per workspace.
+- Persisted terminal scrollback snapshots.
+- Lifecycle logs for setup and run activity.
 - Local spotlighter script that mirrors changed workspace files back to the root repository while enabled.
+
+### Fuse
+
+- Non-destructive checkpoint commits written to `refs/loomen-checkpoints/<id>` through a temporary git index.
+- Diff review against checkpoint refs.
+- Diff comments stored per workspace/file/line.
+- Draft PR creation and update through `gh pr create` and `gh pr edit`.
+- PR/check status reading through `gh`.
+- Failed-check reruns through `gh run rerun --failed`.
+
+### Sever
+
+- Workspace archive and restore state.
+- Archive metadata storage.
+- Conservative cleanup posture: destructive branch/worktree deletion is not automatic.
+
+### Foundation
+
+- Tauri 2 desktop shell with static WebView frontend.
+- Rust backend with command handlers for repositories, workspaces, sessions, files, diffs, terminals, PRs, settings, and sidecar lifecycle.
+- Dark workbench UI with repository/history sidebar, workspace tabs, Scratchpad, chat sessions, command palette, notifications, composer controls, slash commands, and file mentions.
+- Settings pages for models, providers, appearance, git defaults, account placeholders, experiments, and advanced paths.
+
+## Known Gaps
+
+- The Rust command layer and frontend entrypoint are still large single files; the implementation is functional but wants module boundaries.
+- Interactive agent questions are acknowledged but currently skipped rather than rendered as first-class UI.
+- Sidecar diagnostics and restart behavior need to be more explicit.
+- Merge/archive cleanup is intentionally conservative and still needs a complete, conflict-aware flow.
+- Sever does not yet offer a full cleanup preview for branch deletion and `git worktree remove`.
+- `dist/` is checked in intentionally for Tauri, but generated source maps and native build output should stay out of git.
 
 ## Verification
 
@@ -35,6 +89,6 @@ The GitHub PR write actions are intentionally not covered by automated tests bec
 
 ## Publish Hygiene
 
-- No build output should be committed.
-- No app bundle, private database, binary assets, or local research notes are required.
+- `dist/` is intentionally committed for the current Tauri frontend.
+- Native build output, app bundles, private databases, binary assets, and local research notes should not be committed.
 - Agent executables are discovered from explicit settings, `LOOMEN_CLAUDE_BIN` / `LOOMEN_CODEX_BIN`, or `PATH`.

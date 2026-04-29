@@ -1,18 +1,33 @@
 # Loomen
 
-Loomen is a local macOS workbench for running agent-backed coding sessions in isolated git worktrees.
+Weave logic, seek lumen.
 
-It is a Tauri 2 desktop app with a Rust backend, a static WebView frontend, SQLite persistence, PTY terminals, git workspace management, and a Unix-socket JSON-RPC sidecar for Claude Code / Codex CLI execution.
+AI coding changes software from a single line of edits into many candidate futures. Loomen is a local macOS workbench that gives each future a real place to live, a way to be seen, and a path back home.
 
-## Features
+Every Loomen path is grounded in ordinary git: a repository, a branch, a worktree, sessions, checkpoints, diffs, terminals, and review evidence. The surface is poetic; the machinery stays inspectable.
+
+Loomen is a Tauri 2 app with a Rust backend, a static WebView frontend, SQLite persistence, PTY terminals, git workspace management, and a Unix-socket JSON-RPC sidecar for Claude Code / Codex CLI execution.
+
+## The Loomen Model
+
+- **Weave** a workspace: create a task-scoped path from a base branch using a real `git worktree add` branch.
+- **Ray** a path: reveal files, diffs, search results, PR/check state, context usage, and terminal evidence.
+- **Beam** a session: watch Claude Code or Codex stream through a path with messages, events, and approvals.
+- **Pulse** validation: run setup scripts, test scripts, shell commands, and future multi-workspace checks.
+- **Fuse** through review: checkpoint, inspect, comment, publish PRs, follow checks, and prepare a path for merge.
+- **Sever** with care: archive, restore, and eventually clean up branches and worktrees only when the user chooses.
+
+These words are not decorative labels. They are the operating verbs of a code-evolution instrument: create paths, illuminate them, observe their live flow, test them, bring the worthy ones home, and stop carrying the rest.
+
+## Current Surface
 
 - Import local git repositories and inspect branch / remote metadata.
-- Create task workspaces backed by real `git worktree add` branches.
-- Run Claude Code or Codex sessions from the app, with streaming output, cancellation, permission modes, and approximate context usage.
-- Review workspace changes with structured patches, hunk navigation, line comments, file preview, search, and Finder actions.
-- Save non-destructive checkpoint refs under `refs/loomen-checkpoints/<id>`.
-- Manage setup scripts, run scripts, and PTY-backed zsh terminals per workspace.
-- Read GitHub PR/check status through `gh`, create or update draft PRs, and rerun failed checks.
+- Weave task workspaces backed by real `git worktree add` branches.
+- Beam Claude Code or Codex sessions from the app with streaming output, cancellation, permission modes, and approximate context usage.
+- Ray workspace state through file trees, safe previews, search, structured patches, hunk navigation, line comments, Finder actions, PR status, and check state.
+- Pulse setup scripts, run scripts, one-off shell commands, and PTY-backed zsh terminals per workspace.
+- Fuse work through non-destructive checkpoint refs under `refs/loomen-checkpoints/<id>`, diff review, comments, draft PR creation/update, and check reruns.
+- Sever work through archive/restore flows today, with more explicit branch and worktree cleanup planned.
 - Keep per-workspace scratchpad notes, local notifications, settings, command palette entries, slash commands, and `@file` suggestions.
 
 ## Requirements
@@ -55,10 +70,20 @@ Sidecar protocol harness:
 bun sidecar/index.ts
 ```
 
-The checked-in `dist/` directory is the frontend used by Tauri. No npm install is needed for the current implementation.
+The checked-in `dist/` directory is intentional: it is the frontend used by Tauri for the current implementation. No npm install is needed to run the app as checked in.
 
 ## Data
 
 Loomen stores its local SQLite database in the macOS application data directory for `dev.kohoj.loomen` as `loomen.db`.
 
 Build artifacts under `src-tauri/target/` are intentionally ignored and should not be committed.
+
+## Repository Status
+
+The repository is source-available application code and currently does not include an open-source license. It also does not include proprietary binaries, private databases, or vendored Claude/Codex executables.
+
+## Docs
+
+- [Semantics](docs/SEMANTICS.md): the product language charter for Weave, Ray, Beam, Pulse, Fuse, and Sever.
+- [Status](docs/STATUS.md): current implementation state, known gaps, and verification.
+- [Roadmap](docs/ROADMAP.md): next steps for product direction, runtime, delivery, and architecture health.
