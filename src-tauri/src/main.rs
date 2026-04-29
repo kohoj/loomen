@@ -13,6 +13,11 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
+mod github;
+use github::{
+    create_pull_request_for_cwd, get_pull_request_info_for_cwd, rerun_failed_checks_for_branch,
+    update_pull_request_for_cwd, PullRequestInfo,
+};
 mod pulse;
 use pulse::{
     command_label, list_pulse_evidence_for_db, named_pulses_for_path, run_shell_command,
@@ -303,34 +308,6 @@ struct SpotlighterInfo {
     root_path: String,
     is_running: bool,
     started_at: i64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PullRequestInfo {
-    workspace_id: String,
-    number: Option<i64>,
-    title: Option<String>,
-    url: Option<String>,
-    state: Option<String>,
-    is_draft: bool,
-    head_ref_name: Option<String>,
-    base_ref_name: Option<String>,
-    checks: Vec<CheckInfo>,
-    error: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CheckInfo {
-    name: String,
-    kind: Option<String>,
-    workflow_name: Option<String>,
-    status: Option<String>,
-    conclusion: Option<String>,
-    details_url: Option<String>,
-    started_at: Option<String>,
-    completed_at: Option<String>,
 }
 
 struct QueryContext {
@@ -1428,35 +1405,6 @@ fn get_pull_request_info(
     get_pull_request_info_for_cwd(&workspace_id, &cwd)
 }
 
-fn get_pull_request_info_for_cwd(workspace_id: &str, cwd: &str) -> Result<PullRequestInfo, String> {
-    let output = Command::new(gh_path())
-        .arg("pr")
-        .arg("view")
-        .arg("--json")
-        .arg("number,title,url,state,isDraft,headRefName,baseRefName,statusCheckRollup")
-        .current_dir(&cwd)
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("NO_COLOR", "1")
-        .output()
-        .map_err(|err| err.to_string())?;
-    if output.status.success() {
-        parse_pr_info_json(workspace_id, &String::from_utf8_lossy(&output.stdout))
-    } else {
-        Ok(PullRequestInfo {
-            workspace_id: workspace_id.to_string(),
-            number: None,
-            title: None,
-            url: None,
-            state: None,
-            is_draft: false,
-            head_ref_name: None,
-            base_ref_name: None,
-            checks: Vec::new(),
-            error: Some(String::from_utf8_lossy(&output.stderr).trim().to_string()),
-        })
-    }
-}
-
 #[tauri::command]
 fn create_pull_request(
     workspace_id: String,
@@ -1483,79 +1431,15 @@ fn create_pull_request(
         .ok_or_else(|| "workspace not found".to_string())?;
     drop(db);
 
-    let title = title.trim();
-    if title.is_empty() {
-        return Err("PR title is required".to_string());
-    }
-    let mut command = Command::new(gh_path());
-    command
-        .arg("pr")
-        .arg("create")
-        .arg("--title")
-        .arg(title)
-        .arg("--body")
-        .arg(if body.trim().is_empty() {
-            "Created from Loomen"
-        } else {
-            body.trim()
-        })
-        .current_dir(&cwd)
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("NO_COLOR", "1");
-    if let Some(base) = base_branch.as_deref().filter(|base| !base.is_empty()) {
-        command.arg("--base").arg(base);
-    }
-    if let Some(head) = branch_name.as_deref().filter(|head| !head.is_empty()) {
-        command.arg("--head").arg(head);
-    }
-    if draft {
-        command.arg("--draft");
-    }
-    let output = command.output().map_err(|err| err.to_string())?;
-    if !output.status.success() {
-        return Ok(PullRequestInfo {
-            workspace_id,
-            number: None,
-            title: None,
-            url: None,
-            state: None,
-            is_draft: false,
-            head_ref_name: branch_name,
-            base_ref_name: base_branch,
-            checks: Vec::new(),
-            error: Some(String::from_utf8_lossy(&output.stderr).trim().to_string()),
-        });
-    }
-
-    let view = Command::new(gh_path())
-        .arg("pr")
-        .arg("view")
-        .arg("--json")
-        .arg("number,title,url,state,isDraft,headRefName,baseRefName,statusCheckRollup")
-        .current_dir(&cwd)
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("NO_COLOR", "1")
-        .output()
-        .map_err(|err| err.to_string())?;
-    if view.status.success() {
-        parse_pr_info_json(&workspace_id, &String::from_utf8_lossy(&view.stdout))
-    } else {
-        Ok(PullRequestInfo {
-            workspace_id,
-            number: None,
-            title: Some(title.to_string()),
-            url: String::from_utf8_lossy(&output.stdout)
-                .split_whitespace()
-                .find(|part| part.starts_with("http"))
-                .map(str::to_string),
-            state: Some("OPEN".to_string()),
-            is_draft: draft,
-            head_ref_name: branch_name,
-            base_ref_name: base_branch,
-            checks: Vec::new(),
-            error: None,
-        })
-    }
+    create_pull_request_for_cwd(
+        &workspace_id,
+        &cwd,
+        branch_name,
+        base_branch,
+        &title,
+        &body,
+        draft,
+    )
 }
 
 #[tauri::command]
@@ -1569,41 +1453,7 @@ fn update_pull_request(
     let cwd = workspace_path(&db, &workspace_id)?;
     drop(db);
 
-    let title = title.trim();
-    if title.is_empty() {
-        return Err("PR title is required".to_string());
-    }
-    let output = Command::new(gh_path())
-        .arg("pr")
-        .arg("edit")
-        .arg("--title")
-        .arg(title)
-        .arg("--body")
-        .arg(if body.trim().is_empty() {
-            "Updated from Loomen"
-        } else {
-            body.trim()
-        })
-        .current_dir(&cwd)
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("NO_COLOR", "1")
-        .output()
-        .map_err(|err| err.to_string())?;
-    if !output.status.success() {
-        return Ok(PullRequestInfo {
-            workspace_id,
-            number: None,
-            title: None,
-            url: None,
-            state: None,
-            is_draft: false,
-            head_ref_name: None,
-            base_ref_name: None,
-            checks: Vec::new(),
-            error: Some(String::from_utf8_lossy(&output.stderr).trim().to_string()),
-        });
-    }
-    get_pull_request_info_for_cwd(&workspace_id, &cwd)
+    update_pull_request_for_cwd(&workspace_id, &cwd, &title, &body)
 }
 
 #[tauri::command]
@@ -1626,57 +1476,7 @@ fn rerun_failed_checks(workspace_id: String, state: State<AppState>) -> Result<S
         .map(str::to_string)
         .or_else(|| git_output(&cwd, &["branch", "--show-current"]).ok())
         .ok_or_else(|| "could not determine workspace branch".to_string())?;
-    let list_output = Command::new(gh_path())
-        .arg("run")
-        .arg("list")
-        .arg("--branch")
-        .arg(&branch)
-        .arg("--limit")
-        .arg("1")
-        .arg("--json")
-        .arg("databaseId,status,conclusion,name")
-        .current_dir(&cwd)
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("NO_COLOR", "1")
-        .output()
-        .map_err(|err| err.to_string())?;
-    if !list_output.status.success() {
-        return Err(String::from_utf8_lossy(&list_output.stderr)
-            .trim()
-            .to_string());
-    }
-    let runs: Value = serde_json::from_slice(&list_output.stdout).map_err(|err| err.to_string())?;
-    let run = runs
-        .as_array()
-        .and_then(|items| items.first())
-        .ok_or_else(|| format!("no GitHub Actions runs found for branch {branch}"))?;
-    let run_id = run
-        .get("databaseId")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| "latest run did not include databaseId".to_string())?;
-    let rerun_output = Command::new(gh_path())
-        .arg("run")
-        .arg("rerun")
-        .arg(run_id.to_string())
-        .arg("--failed")
-        .current_dir(&cwd)
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("NO_COLOR", "1")
-        .output()
-        .map_err(|err| err.to_string())?;
-    if rerun_output.status.success() {
-        let run_name = run
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("workflow");
-        Ok(format!(
-            "Rerun requested for failed jobs in {run_name} ({run_id})."
-        ))
-    } else {
-        Err(String::from_utf8_lossy(&rerun_output.stderr)
-            .trim()
-            .to_string())
-    }
+    rerun_failed_checks_for_branch(&cwd, &branch)
 }
 
 #[tauri::command]
@@ -3492,80 +3292,6 @@ fn spotlighter_path() -> PathBuf {
     rebuild_root().join("script").join("spotlighter.sh")
 }
 
-fn gh_path() -> PathBuf {
-    PathBuf::from("gh")
-}
-
-fn check_string_field(item: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        item.get(*key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    })
-}
-
-fn parse_pr_info_json(workspace_id: &str, raw: &str) -> Result<PullRequestInfo, String> {
-    let value: Value = serde_json::from_str(raw).map_err(|err| err.to_string())?;
-    let checks = value
-        .get("statusCheckRollup")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .map(|item| CheckInfo {
-                    name: check_string_field(item, &["name", "context", "workflowName"])
-                        .unwrap_or_else(|| "check".to_string()),
-                    kind: check_string_field(item, &["__typename", "kind", "type"]),
-                    workflow_name: check_string_field(item, &["workflowName", "workflow_name"]),
-                    status: check_string_field(item, &["status", "state"]),
-                    conclusion: check_string_field(item, &["conclusion"]),
-                    details_url: check_string_field(
-                        item,
-                        &[
-                            "detailsUrl",
-                            "details_url",
-                            "targetUrl",
-                            "target_url",
-                            "url",
-                        ],
-                    ),
-                    started_at: check_string_field(item, &["startedAt", "started_at"]),
-                    completed_at: check_string_field(item, &["completedAt", "completed_at"]),
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    Ok(PullRequestInfo {
-        workspace_id: workspace_id.to_string(),
-        number: value.get("number").and_then(Value::as_i64),
-        title: value
-            .get("title")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        url: value.get("url").and_then(Value::as_str).map(str::to_string),
-        state: value
-            .get("state")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        is_draft: value
-            .get("isDraft")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        head_ref_name: value
-            .get("headRefName")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        base_ref_name: value
-            .get("baseRefName")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        checks,
-        error: None,
-    })
-}
-
 fn spotlighter_info(process: &mut SpotlighterProcess) -> Result<SpotlighterInfo, String> {
     let is_running = match process.child.try_wait() {
         Ok(Some(_)) => false,
@@ -4761,66 +4487,6 @@ mod tests {
         assert_eq!(usage.used_tokens, 6);
         assert_eq!(usage.max_tokens, 272_000);
         assert!(usage.percent > 0.0);
-        Ok(())
-    }
-
-    #[test]
-    fn parses_pull_request_info_and_checks() -> Result<(), Box<dyn std::error::Error>> {
-        let raw = r#"{
-          "number": 42,
-          "title": "Add Loomen parity",
-          "url": "https://github.com/example/repo/pull/42",
-          "state": "OPEN",
-          "isDraft": false,
-          "headRefName": "loomen/helsinki",
-          "baseRefName": "main",
-          "statusCheckRollup": [
-            {
-              "name": "test",
-              "__typename": "CheckRun",
-              "workflowName": "CI",
-              "status": "COMPLETED",
-              "conclusion": "SUCCESS",
-              "detailsUrl": "https://github.com/example/repo/actions/runs/1",
-              "startedAt": "2026-04-30T10:00:00Z",
-              "completedAt": "2026-04-30T10:02:30Z"
-            },
-            {
-              "__typename": "StatusContext",
-              "context": "deploy",
-              "state": "PENDING",
-              "targetUrl": "https://ci.example.invalid/deploy"
-            },
-            {
-              "workflowName": "Lint",
-              "status": "QUEUED"
-            }
-          ]
-        }"#;
-        let info = parse_pr_info_json("workspace-1", raw)?;
-        assert_eq!(info.number, Some(42));
-        assert_eq!(info.title.as_deref(), Some("Add Loomen parity"));
-        assert_eq!(info.checks.len(), 3);
-        assert_eq!(info.checks[0].name, "test");
-        assert_eq!(info.checks[0].kind.as_deref(), Some("CheckRun"));
-        assert_eq!(info.checks[0].workflow_name.as_deref(), Some("CI"));
-        assert_eq!(info.checks[0].conclusion.as_deref(), Some("SUCCESS"));
-        assert_eq!(
-            info.checks[0].started_at.as_deref(),
-            Some("2026-04-30T10:00:00Z")
-        );
-        assert_eq!(
-            info.checks[0].completed_at.as_deref(),
-            Some("2026-04-30T10:02:30Z")
-        );
-        assert_eq!(info.checks[1].name, "deploy");
-        assert_eq!(info.checks[1].status.as_deref(), Some("PENDING"));
-        assert_eq!(
-            info.checks[1].details_url.as_deref(),
-            Some("https://ci.example.invalid/deploy")
-        );
-        assert_eq!(info.checks[2].name, "Lint");
-        assert_eq!(info.checks[2].status.as_deref(), Some("QUEUED"));
         Ok(())
     }
 
