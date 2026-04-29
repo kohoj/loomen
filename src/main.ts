@@ -2612,17 +2612,67 @@ function renderChecksPanel() {
   if (!checks.length) {
     return `${actions}<div class="panel-empty">No checks yet<br><span>Checks from GitHub will appear here.</span></div>`;
   }
-  return actions + checks
-    .map(
-      (check) => `
-        <div class="check-row ${check.conclusion ? check.conclusion.toLowerCase() : ""}">
-          <span>${escapeHtml(check.conclusion || check.status || "PENDING")}</span>
-          <strong>${escapeHtml(check.name)}</strong>
-          ${check.detailsUrl ? `<a href="${escapeAttr(check.detailsUrl)}">details</a>` : ""}
-        </div>
-      `
-    )
-    .join("");
+  return actions + checks.map(renderCheckRow).join("");
+}
+
+function renderCheckRow(check) {
+  const status = checkStateLabel(check);
+  const rows = [
+    ["Workflow", check.workflowName],
+    ["Kind", check.kind],
+    ["Status", check.status],
+    ["Conclusion", check.conclusion],
+    ["Started", formatCheckTime(check.startedAt)],
+    ["Completed", formatCheckTime(check.completedAt)],
+    ["Duration", formatCheckDuration(check.startedAt, check.completedAt)]
+  ].filter(([, value]) => value);
+  return `
+    <details class="check-row ${escapeAttr(checkTone(check))}">
+      <summary>
+        <span>${escapeHtml(status)}</span>
+        <strong>${escapeHtml(check.name || "check")}</strong>
+        ${check.detailsUrl ? `<a href="${escapeAttr(check.detailsUrl)}">details</a>` : ""}
+      </summary>
+      <div class="check-detail-grid">
+        ${
+          rows
+            .map(([label, value]) => `<small>${escapeHtml(label)}</small><code>${escapeHtml(value)}</code>`)
+            .join("") || `<small>Evidence</small><code>No extra check metadata returned by GitHub.</code>`
+        }
+      </div>
+    </details>
+  `;
+}
+
+function checkStateLabel(check) {
+  return check.conclusion || check.status || "PENDING";
+}
+
+function checkTone(check) {
+  const value = checkStateLabel(check).toLowerCase();
+  if (value === "success" || value === "passed") return "success";
+  if (["failure", "failed", "error", "cancelled", "timed_out"].includes(value)) return "failure";
+  if (["pending", "queued", "in_progress", "requested", "waiting", "expected"].includes(value)) return "pending";
+  return value || "pending";
+}
+
+function formatCheckTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
+function formatCheckDuration(startedAt, completedAt) {
+  if (!startedAt || !completedAt) return "";
+  const started = new Date(startedAt).getTime();
+  const completed = new Date(completedAt).getTime();
+  if (Number.isNaN(started) || Number.isNaN(completed) || completed < started) return "";
+  const seconds = Math.round((completed - started) / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
 }
 
 function renderChangesPanel() {

@@ -351,9 +351,13 @@ struct PullRequestInfo {
 #[serde(rename_all = "camelCase")]
 struct CheckInfo {
     name: String,
+    kind: Option<String>,
+    workflow_name: Option<String>,
     status: Option<String>,
     conclusion: Option<String>,
     details_url: Option<String>,
+    started_at: Option<String>,
+    completed_at: Option<String>,
 }
 
 struct QueryContext {
@@ -3680,6 +3684,16 @@ fn gh_path() -> PathBuf {
     PathBuf::from("gh")
 }
 
+fn check_string_field(item: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        item.get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
 fn parse_pr_info_json(workspace_id: &str, raw: &str) -> Result<PullRequestInfo, String> {
     let value: Value = serde_json::from_str(raw).map_err(|err| err.to_string())?;
     let checks = value
@@ -3689,25 +3703,24 @@ fn parse_pr_info_json(workspace_id: &str, raw: &str) -> Result<PullRequestInfo, 
             items
                 .iter()
                 .map(|item| CheckInfo {
-                    name: item
-                        .get("name")
-                        .or_else(|| item.get("workflowName"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("check")
-                        .to_string(),
-                    status: item
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    conclusion: item
-                        .get("conclusion")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    details_url: item
-                        .get("detailsUrl")
-                        .or_else(|| item.get("details_url"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
+                    name: check_string_field(item, &["name", "context", "workflowName"])
+                        .unwrap_or_else(|| "check".to_string()),
+                    kind: check_string_field(item, &["__typename", "kind", "type"]),
+                    workflow_name: check_string_field(item, &["workflowName", "workflow_name"]),
+                    status: check_string_field(item, &["status", "state"]),
+                    conclusion: check_string_field(item, &["conclusion"]),
+                    details_url: check_string_field(
+                        item,
+                        &[
+                            "detailsUrl",
+                            "details_url",
+                            "targetUrl",
+                            "target_url",
+                            "url",
+                        ],
+                    ),
+                    started_at: check_string_field(item, &["startedAt", "started_at"]),
+                    completed_at: check_string_field(item, &["completedAt", "completed_at"]),
                 })
                 .collect::<Vec<_>>()
         })
@@ -4941,18 +4954,50 @@ index ce01362..cc628cc 100644
           "statusCheckRollup": [
             {
               "name": "test",
+              "__typename": "CheckRun",
+              "workflowName": "CI",
               "status": "COMPLETED",
               "conclusion": "SUCCESS",
-              "detailsUrl": "https://github.com/example/repo/actions/runs/1"
+              "detailsUrl": "https://github.com/example/repo/actions/runs/1",
+              "startedAt": "2026-04-30T10:00:00Z",
+              "completedAt": "2026-04-30T10:02:30Z"
+            },
+            {
+              "__typename": "StatusContext",
+              "context": "deploy",
+              "state": "PENDING",
+              "targetUrl": "https://ci.example.invalid/deploy"
+            },
+            {
+              "workflowName": "Lint",
+              "status": "QUEUED"
             }
           ]
         }"#;
         let info = parse_pr_info_json("workspace-1", raw)?;
         assert_eq!(info.number, Some(42));
         assert_eq!(info.title.as_deref(), Some("Add Loomen parity"));
-        assert_eq!(info.checks.len(), 1);
+        assert_eq!(info.checks.len(), 3);
         assert_eq!(info.checks[0].name, "test");
+        assert_eq!(info.checks[0].kind.as_deref(), Some("CheckRun"));
+        assert_eq!(info.checks[0].workflow_name.as_deref(), Some("CI"));
         assert_eq!(info.checks[0].conclusion.as_deref(), Some("SUCCESS"));
+        assert_eq!(
+            info.checks[0].started_at.as_deref(),
+            Some("2026-04-30T10:00:00Z")
+        );
+        assert_eq!(
+            info.checks[0].completed_at.as_deref(),
+            Some("2026-04-30T10:02:30Z")
+        );
+        assert_eq!(info.checks[1].name, "deploy");
+        assert_eq!(info.checks[1].status.as_deref(), Some("PENDING"));
+        assert_eq!(
+            info.checks[1].details_url.as_deref(),
+            Some("https://ci.example.invalid/deploy")
+        );
+        assert_eq!(info.checks[2].name, "Lint");
+        assert_eq!(info.checks[2].status.as_deref(), Some("QUEUED"));
         Ok(())
     }
 

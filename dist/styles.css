@@ -1481,14 +1481,23 @@ button.file-row.active {
 }
 
 .check-row {
+  border-bottom: 1px solid #25201e;
+  color: #cfc7c1;
+  font-size: 12px;
+}
+
+.check-row summary {
   display: grid;
   grid-template-columns: 86px minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
   min-height: 34px;
-  border-bottom: 1px solid #25201e;
-  color: #cfc7c1;
-  font-size: 12px;
+  cursor: default;
+  list-style: none;
+}
+
+.check-row summary::-webkit-details-marker {
+  display: none;
 }
 
 .checks-actions {
@@ -1509,9 +1518,16 @@ button.file-row.active {
 }
 
 .check-row.failure span,
+.check-row.error span,
 .check-row.cancelled span,
 .check-row.timed_out span {
   color: #df8d7f;
+}
+
+.check-row.pending span,
+.check-row.queued span,
+.check-row.in_progress span {
+  color: #d4ae6f;
 }
 
 .check-row strong {
@@ -1523,6 +1539,27 @@ button.file-row.active {
 .check-row a {
   color: #c89a83;
   text-decoration: none;
+}
+
+.check-detail-grid {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 6px 10px;
+  border-top: 1px solid #25201e;
+  padding: 8px 0 10px 94px;
+}
+
+.check-detail-grid small {
+  color: #706862;
+  font-size: 11px;
+}
+
+.check-detail-grid code {
+  overflow: hidden;
+  color: #aaa19b;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .run-panel {
