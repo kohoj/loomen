@@ -42,6 +42,7 @@ The implementation is already past the CLI prototype stage. It is a local deskto
 - PTY-backed zsh terminal tabs per workspace.
 - Persisted terminal scrollback snapshots.
 - Lifecycle logs for setup and run activity.
+- Pulse evidence records for setup scripts, run scripts, and one-off commands, including label, kind, exit status, duration, workspace path, output, and checkpoint attribution.
 - Local spotlighter script that mirrors changed workspace files back to the root repository while enabled.
 
 ### Fuse

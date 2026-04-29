@@ -25,7 +25,7 @@ These words are not decorative labels. They are the operating verbs of a code-ev
 - Weave task workspaces backed by real `git worktree add` branches.
 - Beam Claude Code or Codex sessions from the app with streaming output, cancellation, permission modes, and approximate context usage.
 - Ray workspace state through file trees, safe previews, search, structured patches, hunk navigation, line comments, Finder actions, PR status, and check state.
-- Pulse setup scripts, run scripts, one-off shell commands, and PTY-backed zsh terminals per workspace.
+- Pulse setup scripts, run scripts, one-off shell commands, PTY-backed zsh terminals, and recent validation evidence per workspace.
 - Fuse work through non-destructive checkpoint refs under `refs/loomen-checkpoints/<id>`, diff review, comments, draft PR creation/update, and check reruns.
 - Sever work through archive/restore flows today, with more explicit branch and worktree cleanup planned.
 - Keep per-workspace scratchpad notes, local notifications, settings, command palette entries, slash commands, and `@file` suggestions.
