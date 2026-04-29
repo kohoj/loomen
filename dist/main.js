@@ -20,6 +20,8 @@ let launchHealth = null;
 let lastDiff = "";
 let terminalRun = null;
 let pulseEvidence = [];
+let namedPulses = [];
+let pendingPulseId = "";
 let ptyTerminals = [];
 let selectedTerminalId = "";
 let ptyPoller = null;
@@ -764,6 +766,9 @@ function bindEvents() {
       render();
     });
   });
+  document.querySelectorAll("[data-pulse-id]").forEach((button) => {
+    button.addEventListener("click", () => runNamedPulse(button.dataset.pulseId));
+  });
   document.querySelectorAll("[data-terminal-id]").forEach((button) => {
     button.addEventListener("click", (event) => {
       if (event.target?.dataset?.closeTerminal) return;
@@ -1122,8 +1127,10 @@ function renderSetupTab(repo, workspace) {
 }
 
 function renderRunTab(repo, workspace) {
+  const pulses = renderNamedPulses(workspace);
   if (!repo?.runScript && !runScriptEditorOpen) {
     return `
+      ${pulses}
       <div class="panel-empty run-empty">
         <button type="button" data-action-click="add-run-script">Add run script</button>
         <span>Run tests or a development server to test changes in this workspace</span>
@@ -1133,6 +1140,7 @@ function renderRunTab(repo, workspace) {
   if (repo?.runScript && !runScriptEditorOpen) {
     const firstLine = repo.runScript.split("\n").find((line) => line.trim()) || "Run script configured";
     return `
+      ${pulses}
       <div class="script-summary">
         <div>
           <strong>Run script</strong>
@@ -1149,6 +1157,7 @@ function renderRunTab(repo, workspace) {
     `;
   }
   return `
+    ${pulses}
     <form class="script-config" data-action="save-scripts">
       <textarea name="runScript" rows="4" placeholder="Run script">${escapeHtml(repo?.runScript ?? "")}</textarea>
       <button type="submit" ${repo ? "" : "disabled"}>Save run script</button>
@@ -1159,6 +1168,27 @@ function renderRunTab(repo, workspace) {
       <button data-action-click="stop-spotlight" ${spotlighter?.isRunning ? "" : "disabled"}>Stop sync</button>
     </div>
     ${lifecycleRun ? `<pre class="lifecycle-output">${escapeHtml(`$ ${lifecycleRun.command}\n${lifecycleRun.output}`)}</pre>` : `<div class="panel-empty small">Run tests or a development server to test changes in this workspace</div>`}
+  `;
+}
+
+function renderNamedPulses(workspace) {
+  if (!workspace) return "";
+  if (!namedPulses.length) {
+    return `<div class="named-pulses empty"><span>No named pulses detected</span></div>`;
+  }
+  return `
+    <div class="named-pulses">
+      ${namedPulses
+        .map(
+          (pulse) => `
+            <button type="button" class="named-pulse" data-pulse-id="${escapeAttr(pulse.id)}" title="${escapeAttr(pulse.command)}" ${pendingPulseId ? "disabled" : ""}>
+              <strong>${escapeHtml(pulse.title)}</strong>
+              <span>${escapeHtml(pulse.detail || pulse.source || pulse.command)}</span>
+            </button>
+          `
+        )
+        .join("")}
+    </div>
   `;
 }
 
@@ -1261,6 +1291,9 @@ function renderCommandPalette() {
     ["launch-health", "Launch health", "Ray local runtime dependencies"],
     ["settings", "Settings", "Open Loomen-style settings"]
   ];
+  for (const pulse of namedPulses) {
+    commands.push([`named-pulse:${pulse.id}`, `Pulse ${pulse.title}`, pulse.command]);
+  }
   const query = paletteQuery.trim().toLowerCase();
   const commandRows = commands.filter(([id, title, detail]) =>
     [id, title, detail].some((value) => value.toLowerCase().includes(query))
@@ -1337,6 +1370,9 @@ async function runCommandAction(action) {
   if (action === "pulse-evidence") {
     activeRunTab = "evidence";
     return render();
+  }
+  if (action.startsWith("named-pulse:")) {
+    return runNamedPulse(action.slice("named-pulse:".length));
   }
   if (action === "fuse-readiness") {
     activeRightPanel = "checks";
@@ -2165,6 +2201,8 @@ async function refreshWorkspacePanels() {
     changeFilter = "";
     prInfo = null;
     pulseEvidence = [];
+    namedPulses = [];
+    pendingPulseId = "";
     workspaceInitInfo = null;
     ptyTerminals = [];
     selectedTerminalId = "";
@@ -2172,14 +2210,15 @@ async function refreshWorkspacePanels() {
     return;
   }
   const session = currentSession();
-  [files, changes, diffFiles, diffComments, prInfo, contextUsage, pulseEvidence] = await Promise.all([
+  [files, changes, diffFiles, diffComments, prInfo, contextUsage, pulseEvidence, namedPulses] = await Promise.all([
     invoke("list_workspace_files", { workspaceId: workspace.id }).catch(() => []),
     invoke("list_workspace_changes", { workspaceId: workspace.id }).catch(() => []),
     invoke("get_workspace_patch", { workspaceId: workspace.id }).catch(() => []),
     invoke("list_diff_comments", { workspaceId: workspace.id }).catch(() => []),
     invoke("get_pull_request_info", { workspaceId: workspace.id }).catch((error) => ({ error: String(error), checks: [] })),
     session ? invoke("get_context_usage", { sessionId: session.id }).catch(() => null) : Promise.resolve(null),
-    invoke("list_pulse_evidence", { workspaceId: workspace.id, limit: 12 }).catch(() => [])
+    invoke("list_pulse_evidence", { workspaceId: workspace.id, limit: 12 }).catch(() => []),
+    invoke("list_named_pulses", { workspaceId: workspace.id }).catch(() => [])
   ]);
   workspaceInitInfo = await invoke("workspace_init", { workspaceId: workspace.id }).catch(() => null);
   ptyTerminals = await invoke("list_pty_terminals", { workspaceId: workspace.id }).catch(() => []);
@@ -2230,6 +2269,29 @@ async function runWorkspaceScript() {
   if (!workspace) return;
   lifecycleRun = await invoke("run_workspace_run_script", { workspaceId: workspace.id });
   pushNotification("Run script finished", `exit ${lifecycleRun.exitCode ?? "signal"}`, lifecycleRun.exitCode === 0 ? "success" : "error");
+  await refreshWorkspacePanels();
+  render();
+}
+
+async function runNamedPulse(pulseId) {
+  const workspace = currentWorkspace();
+  if (!workspace || !pulseId || pendingPulseId) return;
+  pendingPulseId = pulseId;
+  render();
+  lifecycleRun = await invoke("run_named_pulse", { workspaceId: workspace.id, pulseId }).catch((error) => {
+    lastError = String(error);
+    pushNotification("Pulse failed", lastError, "error");
+    return null;
+  });
+  pendingPulseId = "";
+  if (lifecycleRun) {
+    activeRunTab = "evidence";
+    pushNotification(
+      `${lifecycleRun.label || "Pulse"} finished`,
+      `exit ${lifecycleRun.exitCode ?? "signal"}`,
+      lifecycleRun.exitCode === 0 ? "success" : "error"
+    );
+  }
   await refreshWorkspacePanels();
   render();
 }
@@ -2823,6 +2885,7 @@ function formatCheckDuration(startedAt, completedAt) {
 function pulseKindLabel(kind) {
   if (kind === "setup") return "Setup";
   if (kind === "run") return "Run";
+  if (kind === "pulse") return "Pulse";
   return "Command";
 }
 
