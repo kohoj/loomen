@@ -1254,6 +1254,7 @@ function renderCommandPalette() {
     ["run-setup", "Run setup", "Execute repository setup script"],
     ["run-script", "Run script", "Execute repository run script"],
     ["pulse-evidence", "Pulse evidence", "Review recent validation evidence"],
+    ["fuse-readiness", "Fuse readiness", "Review evidence before merging"],
     ["open-workspace", "Open workspace", "Open this workspace in Finder"],
     ["open-repo", "Open repository", "Open the root repository in Finder"],
     ["repo-settings", "Repo settings", "Open repository details and branch info"],
@@ -1335,6 +1336,10 @@ async function runCommandAction(action) {
   if (action === "run-script") return runWorkspaceScript();
   if (action === "pulse-evidence") {
     activeRunTab = "evidence";
+    return render();
+  }
+  if (action === "fuse-readiness") {
+    activeRightPanel = "checks";
     return render();
   }
   if (action === "open-workspace") return openWorkspaceInFinder();
@@ -2647,6 +2652,97 @@ function renderPrSummary() {
   `;
 }
 
+function renderFuseReadiness() {
+  const items = fuseReadinessItems();
+  const tone = readinessTone(items);
+  const labels = {
+    ready: ["Ready to fuse", "Local evidence and remote checks are clear"],
+    review: ["Needs review", "Some evidence is missing or still moving"],
+    blocked: ["Not ready to fuse", "Resolve the blocking evidence before merge"]
+  };
+  const [title, detail] = labels[tone];
+  return `
+    <section class="fuse-readiness ${tone}">
+      <header>
+        <strong>${escapeHtml(title)}</strong>
+        <span>${escapeHtml(detail)}</span>
+      </header>
+      <div>
+        ${items.map(renderReadinessItem).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function fuseReadinessItems() {
+  const workspace = currentWorkspace();
+  const unresolvedComments = diffComments.filter((comment) => !comment.isResolved).length;
+  const latestPulse = pulseEvidence[0];
+  const failingPulses = pulseEvidence.filter((run) => run.exitCode !== 0).length;
+  const checks = prInfo?.checks ?? [];
+  const failedChecks = checks.filter((check) => checkTone(check) === "failure").length;
+  const pendingChecks = checks.filter((check) => checkTone(check) === "pending").length;
+
+  return [
+    {
+      label: "Checkpoint",
+      status: workspace?.checkpointId ? "success" : "warning",
+      detail: workspace?.checkpointId || "No checkpoint saved"
+    },
+    {
+      label: "Pulse evidence",
+      status: !latestPulse ? "warning" : latestPulse.exitCode !== 0 ? "failure" : failingPulses ? "warning" : "success",
+      detail: !latestPulse
+        ? "No recent validation"
+        : latestPulse.exitCode !== 0
+          ? `${pulseKindLabel(latestPulse.kind)} failed ${relativeTime(latestPulse.endedAt)}`
+          : failingPulses
+            ? `${pulseKindLabel(latestPulse.kind)} passed, ${failingPulses} earlier failed`
+          : `${pulseKindLabel(latestPulse.kind)} passed ${relativeTime(latestPulse.endedAt)}`
+    },
+    {
+      label: "Review comments",
+      status: unresolvedComments ? "failure" : "success",
+      detail: unresolvedComments ? `${unresolvedComments} unresolved` : "No unresolved comments"
+    },
+    {
+      label: "PR checks",
+      status: prInfo?.error || !checks.length ? "warning" : failedChecks ? "failure" : pendingChecks ? "warning" : "success",
+      detail: prInfo?.error
+        ? "No pull request"
+        : !checks.length
+          ? "No GitHub checks"
+          : failedChecks
+            ? `${failedChecks} failing`
+            : pendingChecks
+              ? `${pendingChecks} pending`
+              : `${checks.length} clear`
+    }
+  ];
+}
+
+function readinessTone(items) {
+  if (items.some((item) => item.status === "failure")) return "blocked";
+  if (items.some((item) => item.status === "warning")) return "review";
+  return "ready";
+}
+
+function renderReadinessItem(item) {
+  return `
+    <article class="readiness-item ${escapeAttr(item.status)}">
+      <span>${escapeHtml(readinessStatusMark(item.status))}</span>
+      <strong>${escapeHtml(item.label)}</strong>
+      <em>${escapeHtml(item.detail)}</em>
+    </article>
+  `;
+}
+
+function readinessStatusMark(status) {
+  if (status === "success") return "ok";
+  if (status === "failure") return "block";
+  return "wait";
+}
+
 function renderChecksPanel() {
   const checks = prInfo?.checks ?? [];
   const actions = `
@@ -2656,12 +2752,12 @@ function renderChecksPanel() {
     </div>
   `;
   if (prInfo?.error) {
-    return `${actions}<div class="panel-empty">No checks yet<br><span>${escapeHtml(prInfo.error)}</span></div>`;
+    return `${renderFuseReadiness()}${actions}<div class="panel-empty">No checks yet<br><span>${escapeHtml(prInfo.error)}</span></div>`;
   }
   if (!checks.length) {
-    return `${actions}<div class="panel-empty">No checks yet<br><span>Checks from GitHub will appear here.</span></div>`;
+    return `${renderFuseReadiness()}${actions}<div class="panel-empty">No checks yet<br><span>Checks from GitHub will appear here.</span></div>`;
   }
-  return actions + checks.map(renderCheckRow).join("");
+  return renderFuseReadiness() + actions + checks.map(renderCheckRow).join("");
 }
 
 function renderCheckRow(check) {
