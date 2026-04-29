@@ -3,9 +3,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Mutex};
@@ -28,6 +26,12 @@ use review::{
     add_diff_comment_for_db, add_diff_comment_from_params, list_diff_comments_for_db,
     parse_diff_files, resolve_diff_comment_for_db, DiffComment, DiffFile, DiffOutput,
 };
+mod sidecar;
+use sidecar::{
+    cancel_query as cancel_sidecar_query, send_query_to_sidecar as send_query_to_sidecar_socket,
+    sidecar_health, sidecar_rpc as sidecar_socket_rpc, sidecar_socket_path, SidecarProcess,
+    SidecarQuery, SidecarRuntimeSettings,
+};
 mod terminal;
 use terminal::{
     delete_pty_terminal_snapshot, load_pty_terminal_snapshot, load_pty_terminal_snapshots,
@@ -42,18 +46,6 @@ struct AppState {
     ptys: Mutex<HashMap<String, PtySession>>,
     spotlighters: Mutex<HashMap<String, SpotlighterProcess>>,
     approvals: Mutex<HashMap<String, mpsc::Sender<ToolApprovalDecision>>>,
-}
-
-struct SidecarProcess {
-    child: Child,
-    socket_path: PathBuf,
-}
-
-impl Drop for SidecarProcess {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
 }
 
 struct SpotlighterProcess {
@@ -868,8 +860,9 @@ fn get_launch_health(state: State<AppState>) -> Result<LaunchHealth, String> {
 #[tauri::command]
 fn sidecar_status(state: State<AppState>) -> Result<String, String> {
     let mut sidecar = state.sidecar.lock().map_err(|err| err.to_string())?;
-    let process = ensure_sidecar(&state.rebuild_root, &mut sidecar)?;
-    Ok(process.socket_path.display().to_string())
+    Ok(sidecar_socket_path(&state.rebuild_root, &mut sidecar)?
+        .display()
+        .to_string())
 }
 
 #[tauri::command]
@@ -919,26 +912,9 @@ fn claude_auth_status(state: State<AppState>) -> Result<Value, String> {
 fn cancel_query(session_id: String, state: State<AppState>) -> Result<(), String> {
     let socket_path = {
         let mut sidecar = state.sidecar.lock().map_err(|err| err.to_string())?;
-        ensure_sidecar(&state.rebuild_root, &mut sidecar)?
-            .socket_path
-            .clone()
+        sidecar_socket_path(&state.rebuild_root, &mut sidecar)?
     };
-    let mut stream = UnixStream::connect(&socket_path).map_err(|err| {
-        format!(
-            "failed to connect sidecar socket {}: {}",
-            socket_path.display(),
-            err
-        )
-    })?;
-    let payload = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": Uuid::new_v4().to_string(),
-        "method": "cancel",
-        "params": { "id": session_id }
-    });
-    writeln!(stream, "{}", payload).map_err(|err| err.to_string())?;
-    stream.flush().map_err(|err| err.to_string())?;
-    Ok(())
+    cancel_sidecar_query(&socket_path, &session_id)
 }
 
 #[tauri::command]
@@ -3227,64 +3203,16 @@ fn command_version(path: &str, args: &[&str]) -> Option<String> {
 }
 
 fn sidecar_launch_health(sidecar: &mut Option<SidecarProcess>) -> LaunchHealthCheck {
-    match sidecar.as_mut() {
-        None => LaunchHealthCheck {
-            id: "sidecar".to_string(),
-            label: "Sidecar".to_string(),
-            status: "ok".to_string(),
-            detail: "Sidecar is idle and will start when Beam or workspace init needs it."
-                .to_string(),
-            path: None,
-            version: None,
-            required: true,
-            remediation: None,
-        },
-        Some(process) => match process.child.try_wait() {
-            Ok(None) if process.socket_path.exists() => LaunchHealthCheck {
-                id: "sidecar".to_string(),
-                label: "Sidecar".to_string(),
-                status: "ok".to_string(),
-                detail: "Sidecar process is running and the socket exists.".to_string(),
-                path: Some(process.socket_path.display().to_string()),
-                version: None,
-                required: true,
-                remediation: None,
-            },
-            Ok(None) => LaunchHealthCheck {
-                id: "sidecar".to_string(),
-                label: "Sidecar".to_string(),
-                status: "error".to_string(),
-                detail: "Sidecar process is running but its socket is missing.".to_string(),
-                path: Some(process.socket_path.display().to_string()),
-                version: None,
-                required: true,
-                remediation: Some(
-                    "Restart the sidecar by starting a new Beam session.".to_string(),
-                ),
-            },
-            Ok(Some(status)) => LaunchHealthCheck {
-                id: "sidecar".to_string(),
-                label: "Sidecar".to_string(),
-                status: "error".to_string(),
-                detail: format!("Sidecar exited with status {status}."),
-                path: Some(process.socket_path.display().to_string()),
-                version: None,
-                required: true,
-                remediation: Some(
-                    "Check Bun and sidecar/index.ts, then start a new Beam session.".to_string(),
-                ),
-            },
-            Err(err) => LaunchHealthCheck {
-                id: "sidecar".to_string(),
-                label: "Sidecar".to_string(),
-                status: "error".to_string(),
-                detail: format!("Could not inspect sidecar process: {err}"),
-                path: Some(process.socket_path.display().to_string()),
-                version: None,
-                required: true,
-                remediation: Some("Restart Loomen or start a new Beam session.".to_string()),
-            },
-        },
+    let health = sidecar_health(sidecar);
+    LaunchHealthCheck {
+        id: "sidecar".to_string(),
+        label: "Sidecar".to_string(),
+        status: health.status.to_string(),
+        detail: health.detail,
+        path: health.path,
+        version: None,
+        required: true,
+        remediation: health.remediation,
     }
 }
 
@@ -3388,50 +3316,20 @@ fn sidecar_rpc(
 ) -> Result<Value, String> {
     let socket_path = {
         let mut sidecar = state.sidecar.lock().map_err(|err| err.to_string())?;
-        ensure_sidecar(&state.rebuild_root, &mut sidecar)?
-            .socket_path
-            .clone()
+        sidecar_socket_path(&state.rebuild_root, &mut sidecar)?
     };
-    let mut stream = UnixStream::connect(&socket_path).map_err(|err| {
-        format!(
-            "failed to connect sidecar socket {}: {}",
-            socket_path.display(),
-            err
-        )
-    })?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|err| err.to_string())?;
-    let request_id = Uuid::new_v4().to_string();
-    let payload = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "method": method,
-        "params": params
-    });
-    writeln!(stream, "{}", payload).map_err(|err| err.to_string())?;
-    stream.flush().map_err(|err| err.to_string())?;
+    sidecar_socket_rpc(&socket_path, method, params, timeout)
+}
 
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let bytes = reader.read_line(&mut line).map_err(|err| err.to_string())?;
-        if bytes == 0 {
-            return Err("sidecar closed the socket before sending a response".to_string());
-        }
-        let value: Value = serde_json::from_str(line.trim()).map_err(|err| err.to_string())?;
-        if value.get("id").and_then(Value::as_str) != Some(request_id.as_str()) {
-            continue;
-        }
-        if let Some(message) = value
-            .get("error")
-            .and_then(|error| error.get("message"))
-            .and_then(Value::as_str)
-        {
-            return Err(message.to_string());
-        }
-        return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+fn sidecar_runtime_settings(settings: &AppSettings) -> SidecarRuntimeSettings {
+    SidecarRuntimeSettings {
+        provider_env: settings.provider_env.clone(),
+        codex_provider_mode: settings.codex_provider_mode.clone(),
+        default_codex_effort: settings.default_codex_effort.clone(),
+        codex_personality: settings.codex_personality.clone(),
+        claude_executable_path: settings.claude_executable_path.clone(),
+        codex_executable_path: settings.codex_executable_path.clone(),
+        claude_tool_approvals: settings.claude_tool_approvals,
     }
 }
 
@@ -3451,121 +3349,30 @@ where
     F: FnMut(String),
     G: FnMut(Value),
 {
-    let runtime_settings = {
+    let settings = {
         let db = state.db.lock().map_err(|err| err.to_string())?;
         load_settings(&db).map_err(|err| err.to_string())?
     };
+    let runtime_settings = sidecar_runtime_settings(&settings);
     let socket_path = {
         let mut sidecar = state.sidecar.lock().map_err(|err| err.to_string())?;
-        ensure_sidecar(&state.rebuild_root, &mut sidecar)?
-            .socket_path
-            .clone()
+        sidecar_socket_path(&state.rebuild_root, &mut sidecar)?
     };
-
-    let mut stream = UnixStream::connect(&socket_path).map_err(|err| {
-        format!(
-            "failed to connect sidecar socket {}: {}",
-            socket_path.display(),
-            err
-        )
-    })?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(60 * 15)))
-        .map_err(|err| err.to_string())?;
-
-    let turn_id = Uuid::new_v4().to_string();
-    let payload = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": turn_id,
-        "method": "query",
-        "params": {
-            "id": session_id,
-                "prompt": prompt,
-                "agentType": agent_type,
-                "options": {
-                    "cwd": cwd,
-                    "model": model.unwrap_or(if agent_type == "codex" { "gpt-5-codex" } else { "opus" }),
-                    "permissionMode": permission_mode,
-                    "providerEnv": runtime_settings.provider_env,
-                    "codexProviderMode": runtime_settings.codex_provider_mode,
-                    "codexEffort": runtime_settings.default_codex_effort,
-                    "codexPersonality": runtime_settings.codex_personality,
-                    "claudeExecutablePath": runtime_settings.claude_executable_path,
-                    "codexExecutablePath": runtime_settings.codex_executable_path,
-                    "claudeToolApprovals": runtime_settings.claude_tool_approvals,
-                    "turnId": turn_id,
-                    "shouldResetGenerator": false
-                }
-            }
-    });
-    writeln!(stream, "{}", payload).map_err(|err| err.to_string())?;
-    stream.flush().map_err(|err| err.to_string())?;
-
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    let mut streamed_messages = Vec::new();
-    loop {
-        line.clear();
-        let bytes = reader.read_line(&mut line).map_err(|err| err.to_string())?;
-        if bytes == 0 {
-            if streamed_messages.is_empty() {
-                return Err("sidecar closed the socket before sending a response".to_string());
-            }
-            return Ok(streamed_messages.join("\n"));
-        }
-        let value: Value = serde_json::from_str(line.trim()).map_err(|err| err.to_string())?;
-        if value.get("id").is_some() && value.get("method").and_then(Value::as_str).is_some() {
-            let response = handle_reverse_rpc(state, app_handle, &value, session_id)?;
-            writeln!(reader.get_mut(), "{}", response).map_err(|err| err.to_string())?;
-            reader.get_mut().flush().map_err(|err| err.to_string())?;
-            continue;
-        }
-        if value.get("id").and_then(Value::as_str) == Some(turn_id.as_str()) {
-            if let Some(error) = value
-                .get("error")
-                .and_then(|error| error.get("message"))
-                .and_then(Value::as_str)
-            {
-                return Err(error.to_string());
-            }
-            let result_text = value
-                .get("result")
-                .and_then(|result| result.get("text"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            return Ok(if streamed_messages.is_empty() {
-                if result_text.is_empty() {
-                    value.to_string()
-                } else {
-                    result_text.to_string()
-                }
-            } else {
-                streamed_messages.join("\n")
-            });
-        }
-        match value.get("method").and_then(Value::as_str) {
-            Some("message") => {
-                if let Some(text) = extract_sidecar_text(&value) {
-                    on_message(text.clone());
-                    streamed_messages.push(text);
-                }
-            }
-            Some("queryError") => {
-                streamed_messages.push(
-                    extract_query_error_text(&value)
-                        .unwrap_or_else(|| "sidecar query failed".to_string()),
-                );
-                continue;
-            }
-            Some("sessionEventNotification") => {
-                if let Some(event) = value.get("params").cloned() {
-                    on_session_event(event);
-                }
-                continue;
-            }
-            _ => continue,
-        }
-    }
+    send_query_to_sidecar_socket(
+        &socket_path,
+        &runtime_settings,
+        SidecarQuery {
+            session_id,
+            prompt,
+            agent_type,
+            cwd,
+            model,
+            permission_mode,
+        },
+        |request| handle_reverse_rpc(state, app_handle, request, session_id),
+        &mut on_message,
+        &mut on_session_event,
+    )
 }
 
 fn handle_reverse_rpc(
@@ -3825,79 +3632,6 @@ fn tool_approval_for_permission(permission_mode: &str) -> (bool, &'static str) {
             "interactive approval is required for this permission mode",
         )
     }
-}
-
-fn ensure_sidecar<'a>(
-    rebuild_root: &Path,
-    sidecar: &'a mut Option<SidecarProcess>,
-) -> Result<&'a SidecarProcess, String> {
-    let needs_start = match sidecar.as_mut() {
-        Some(process) => match process.child.try_wait() {
-            Ok(Some(_)) => true,
-            Ok(None) => !process.socket_path.exists(),
-            Err(_) => true,
-        },
-        None => true,
-    };
-
-    if needs_start {
-        *sidecar = Some(start_sidecar(rebuild_root)?);
-    }
-
-    sidecar
-        .as_ref()
-        .ok_or_else(|| "sidecar failed to start".to_string())
-}
-
-fn start_sidecar(rebuild_root: &Path) -> Result<SidecarProcess, String> {
-    let mut child = Command::new("bun")
-        .arg("sidecar/index.ts")
-        .current_dir(rebuild_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("failed to spawn bun sidecar: {err}"))?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "sidecar stdout was not piped".to_string())?;
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    reader.read_line(&mut line).map_err(|err| err.to_string())?;
-    let socket_path = line
-        .trim()
-        .strip_prefix("SOCKET_PATH=")
-        .map(PathBuf::from)
-        .ok_or_else(|| format!("sidecar did not report SOCKET_PATH, got: {}", line.trim()))?;
-
-    Ok(SidecarProcess { child, socket_path })
-}
-
-fn extract_sidecar_text(value: &Value) -> Option<String> {
-    let message = value.get("params")?.get("message")?;
-    let content = message.get("content")?.as_array()?;
-    let text = content
-        .iter()
-        .filter_map(|item| item.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
-}
-
-fn extract_query_error_text(value: &Value) -> Option<String> {
-    let params = value.get("params")?;
-    params
-        .get("error")
-        .and_then(Value::as_str)
-        .or_else(|| params.get("message").and_then(Value::as_str))
-        .or_else(|| params.get("text").and_then(Value::as_str))
-        .map(str::to_string)
 }
 
 fn rebuild_root() -> PathBuf {
