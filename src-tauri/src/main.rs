@@ -11,6 +11,11 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
+mod git;
+use git::{
+    branch_exists_for_worktree, checkpoint_diff, create_git_worktree, detect_default_branch,
+    git_output, list_git_branches, resolve_git_root, save_checkpoint,
+};
 mod github;
 use github::{
     create_pull_request_for_cwd, get_pull_request_info_for_cwd, rerun_failed_checks_for_branch,
@@ -2396,23 +2401,6 @@ fn workspace_count(db: &Connection, table: &str, workspace_id: &str) -> Result<i
     .map_err(|err| err.to_string())
 }
 
-fn branch_exists_for_worktree(path: &str, branch: &str) -> Option<bool> {
-    if !Path::new(path).exists() {
-        return None;
-    }
-    Command::new("git")
-        .arg("show-ref")
-        .arg("--verify")
-        .arg("--quiet")
-        .arg(format!("refs/heads/{branch}"))
-        .current_dir(path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok()
-        .map(|status| status.success())
-}
-
 fn write_lifecycle_log(workspace_id: &str, kind: &str, output: &str) -> Result<String, String> {
     let dir = std::env::temp_dir().join("loomen-lifecycle");
     std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
@@ -2503,69 +2491,6 @@ fn context_limit_for_model(agent_type: &str, model: Option<&str>) -> i64 {
     } else {
         128_000
     }
-}
-
-fn resolve_git_root(path: &str) -> Result<String, String> {
-    let expanded = expand_tilde(path);
-    git_output(&expanded, &["rev-parse", "--show-toplevel"])
-}
-
-fn detect_default_branch(repo_path: &str) -> Option<String> {
-    git_output(
-        repo_path,
-        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    )
-    .ok()
-    .and_then(|branch| branch.strip_prefix("origin/").map(str::to_string))
-    .or_else(|| {
-        for candidate in ["main", "master", "develop"] {
-            if git_output(repo_path, &["rev-parse", "--verify", candidate]).is_ok() {
-                return Some(candidate.to_string());
-            }
-        }
-        None
-    })
-}
-
-fn list_git_branches(
-    repo_path: &str,
-    current_branch: Option<&str>,
-    default_branch: Option<&str>,
-) -> Vec<String> {
-    let mut branches = Vec::new();
-    for branch in [current_branch, default_branch, Some("HEAD")]
-        .into_iter()
-        .flatten()
-    {
-        push_unique_branch(&mut branches, branch);
-    }
-    if let Ok(output) = git_output(
-        repo_path,
-        &[
-            "for-each-ref",
-            "--format=%(refname:short)",
-            "refs/heads",
-            "refs/remotes",
-        ],
-    ) {
-        for line in output.lines() {
-            let branch = line.trim();
-            if branch.is_empty() || branch == "origin/HEAD" || branch.ends_with("/HEAD") {
-                continue;
-            }
-            push_unique_branch(&mut branches, branch);
-        }
-    }
-    branches.truncate(80);
-    branches
-}
-
-fn push_unique_branch(branches: &mut Vec<String>, branch: &str) {
-    let branch = branch.trim();
-    if branch.is_empty() || branches.iter().any(|item| item == branch) {
-        return;
-    }
-    branches.push(branch.to_string());
 }
 
 fn repo_workspace_context(
@@ -2683,81 +2608,6 @@ fn default_worktree_path(settings: &AppSettings, repo_name: &str, branch_leaf: &
         .to_string()
 }
 
-fn create_git_worktree(
-    repo_path: &str,
-    worktree_path: &str,
-    branch_name: &str,
-    base_branch: &str,
-) -> Result<(), String> {
-    let path = Path::new(worktree_path);
-    if path.exists()
-        && path
-            .read_dir()
-            .map_err(|err| err.to_string())?
-            .next()
-            .is_some()
-    {
-        return Err(format!("worktree path is not empty: {worktree_path}"));
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    }
-    git_status(
-        repo_path,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            branch_name,
-            worktree_path,
-            base_branch,
-        ],
-    )
-}
-
-fn save_checkpoint(worktree_path: &str, id: &str) -> Result<String, String> {
-    let id = sanitize_checkpoint_id(id)?;
-    let ref_name = checkpoint_ref(&id)?;
-    let temp_index =
-        std::env::temp_dir().join(format!("loomen-checkpoint-{}.index", Uuid::new_v4()));
-    let temp_index_value = temp_index.to_string_lossy().to_string();
-    let envs = [("GIT_INDEX_FILE", temp_index_value.as_str())];
-
-    let result = (|| -> Result<String, String> {
-        git_output_with_env(worktree_path, &["read-tree", "HEAD"], &envs)?;
-        git_output_with_env(worktree_path, &["add", "-A", "--", "."], &envs)?;
-        let tree = git_output_with_env(worktree_path, &["write-tree"], &envs)?;
-        let parent = git_output(worktree_path, &["rev-parse", "HEAD"])?;
-        let message = format!("Loomen checkpoint {id}");
-        let commit = git_output_with_env(
-            worktree_path,
-            &[
-                "commit-tree",
-                tree.trim(),
-                "-p",
-                parent.trim(),
-                "-m",
-                &message,
-            ],
-            &envs,
-        )?;
-        git_output(worktree_path, &["update-ref", &ref_name, commit.trim()])?;
-        Ok(id)
-    })();
-
-    let _ = std::fs::remove_file(temp_index);
-    result
-}
-
-fn checkpoint_diff(worktree_path: &str, id: &str, mode: &str) -> Result<String, String> {
-    let ref_name = checkpoint_ref(&sanitize_checkpoint_id(id)?)?;
-    if mode == "--stat" {
-        git_output(worktree_path, &["diff", &ref_name, "--stat"])
-    } else {
-        git_output(worktree_path, &["diff", &ref_name])
-    }
-}
-
 fn workspace_path(db: &Connection, workspace_id: &str) -> Result<String, String> {
     db.query_row(
         "SELECT path FROM workspaces WHERE id = ?1",
@@ -2846,75 +2696,6 @@ fn workspace_diff_basis(
     .optional()
     .map_err(|err| err.to_string())?
     .ok_or_else(|| "workspace not found".to_string())
-}
-
-fn git_output(repo_path: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(args)
-        .output()
-        .map_err(|err| err.to_string())?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(if stderr.is_empty() {
-            format!("git {:?} failed", args)
-        } else {
-            stderr
-        })
-    }
-}
-
-fn git_output_with_env(
-    repo_path: &str,
-    args: &[&str],
-    envs: &[(&str, &str)],
-) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(args)
-        .envs(envs.iter().copied())
-        .output()
-        .map_err(|err| err.to_string())?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(if stderr.is_empty() {
-            format!("git {:?} failed", args)
-        } else {
-            stderr
-        })
-    }
-}
-
-fn sanitize_checkpoint_id(id: &str) -> Result<String, String> {
-    let id = id.trim().trim_matches('/').to_string();
-    let valid = !id.is_empty()
-        && !id.contains("..")
-        && !id.starts_with('-')
-        && id
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/'));
-    if valid {
-        Ok(id)
-    } else {
-        Err("invalid checkpoint id".to_string())
-    }
-}
-
-fn checkpoint_ref(id: &str) -> Result<String, String> {
-    Ok(format!(
-        "refs/loomen-checkpoints/{}",
-        sanitize_checkpoint_id(id)?
-    ))
-}
-
-fn git_status(repo_path: &str, args: &[&str]) -> Result<(), String> {
-    git_output(repo_path, args).map(|_| ())
 }
 
 fn open_path_in_finder(path: &str) -> Result<(), String> {
@@ -3855,49 +3636,6 @@ mod tests {
     }
 
     #[test]
-    fn creates_real_git_worktree_and_checkpoint_ref() -> Result<(), Box<dyn std::error::Error>> {
-        let temp_root = std::env::temp_dir().join(format!("loomen-test-{}", Uuid::new_v4()));
-        let repo = temp_root.join("repo");
-        let worktree = temp_root.join("worktree");
-        std::fs::create_dir_all(&repo)?;
-
-        run_command("git", &["init", "-b", "main"], &repo)?;
-        run_command("git", &["config", "user.name", "Loomen Test"], &repo)?;
-        run_command(
-            "git",
-            &["config", "user.email", "loomen-test@example.invalid"],
-            &repo,
-        )?;
-        std::fs::write(repo.join("README.md"), "hello\n")?;
-        run_command("git", &["add", "README.md"], &repo)?;
-        run_command("git", &["commit", "-m", "initial"], &repo)?;
-
-        create_git_worktree(
-            repo.to_str().unwrap(),
-            worktree.to_str().unwrap(),
-            "loomen/test-worktree",
-            "main",
-        )?;
-        assert!(worktree.join("README.md").exists());
-
-        let checkpoint = save_checkpoint(worktree.to_str().unwrap(), "test-checkpoint")?;
-        assert_eq!(checkpoint, "test-checkpoint");
-        let checkpoint_oid = git_output(
-            repo.to_str().unwrap(),
-            &["rev-parse", "refs/loomen-checkpoints/test-checkpoint"],
-        )?;
-        assert!(!checkpoint_oid.is_empty());
-
-        let _ = run_command(
-            "git",
-            &["worktree", "remove", "--force", worktree.to_str().unwrap()],
-            &repo,
-        );
-        let _ = std::fs::remove_dir_all(&temp_root);
-        Ok(())
-    }
-
-    #[test]
     fn parses_rg_search_match() {
         let item = parse_rg_match("./src/main.rs:42:7:fn search_workspace()").unwrap();
         assert_eq!(item.path, "src/main.rs");
@@ -4295,18 +4033,5 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_root);
         Ok(())
-    }
-
-    fn run_command(cmd: &str, args: &[&str], cwd: &Path) -> Result<(), String> {
-        let output = Command::new(cmd)
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .map_err(|err| err.to_string())?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-        }
     }
 }
