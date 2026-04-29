@@ -1722,6 +1722,50 @@ button.file-row.active {
   background: transparent;
 }
 
+.named-pulses {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  padding: 10px 14px 0;
+}
+
+.named-pulses.empty {
+  display: block;
+  color: #7f746f;
+  font-size: 11px;
+}
+
+.named-pulse {
+  display: grid;
+  gap: 3px;
+  justify-items: start;
+  min-width: 0;
+  min-height: 48px;
+  border-color: #3a302d;
+  background: #120f0f;
+  padding: 8px;
+  text-align: left;
+}
+
+.named-pulse strong {
+  overflow: hidden;
+  max-width: 100%;
+  color: #ded4cd;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.named-pulse span {
+  display: block;
+  overflow: hidden;
+  max-width: 100%;
+  color: #8d837d;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .script-config {
   display: grid;
   gap: 6px;

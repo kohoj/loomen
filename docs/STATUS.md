@@ -36,6 +36,7 @@ The implementation is already past the CLI prototype stage. It is a local deskto
 
 ### Pulse
 
+- Named validation pulses discovered from `package.json` scripts and Cargo manifests.
 - Repository setup scripts.
 - Repository run scripts.
 - One-off workspace shell command execution.
