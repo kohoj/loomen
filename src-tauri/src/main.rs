@@ -278,6 +278,29 @@ struct NamedPulse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct SeverCleanupPreview {
+    workspace_id: String,
+    workspace_name: String,
+    state: String,
+    branch_name: Option<String>,
+    branch_exists: Option<bool>,
+    worktree_path: String,
+    worktree_exists: bool,
+    setup_log_path: Option<String>,
+    run_log_path: Option<String>,
+    has_setup_log: bool,
+    has_run_log: bool,
+    archive_commit: Option<String>,
+    session_count: i64,
+    terminal_run_count: i64,
+    terminal_tab_count: i64,
+    diff_comment_count: i64,
+    database_record_count: i64,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PtyTerminalInfo {
     id: String,
     workspace_id: String,
@@ -1123,6 +1146,15 @@ fn restore_workspace(workspace_id: String, state: State<AppState>) -> Result<App
     )
     .map_err(|err| err.to_string())?;
     load_snapshot(&db, &state.db_path)
+}
+
+#[tauri::command]
+fn preview_sever_cleanup(
+    workspace_id: String,
+    state: State<AppState>,
+) -> Result<SeverCleanupPreview, String> {
+    let db = state.db.lock().map_err(|err| err.to_string())?;
+    sever_cleanup_preview_for_db(&db, &workspace_id)
 }
 
 #[tauri::command]
@@ -2866,6 +2898,108 @@ fn add_cargo_pulses(pulses: &mut Vec<NamedPulse>, root: &Path) {
             });
         }
     }
+}
+
+fn sever_cleanup_preview_for_db(
+    db: &Connection,
+    workspace_id: &str,
+) -> Result<SeverCleanupPreview, String> {
+    let (name, state, path, branch_name, setup_log_path, run_log_path, archive_commit) = db
+        .query_row(
+            "SELECT name, state, path, branch_name, setup_log_path, run_log_path, archive_commit
+             FROM workspaces WHERE id = ?1",
+            params![workspace_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "workspace not found".to_string())?;
+    let worktree_exists = Path::new(&path).exists();
+    let has_setup_log = setup_log_path
+        .as_deref()
+        .map(|path| Path::new(path).exists())
+        .unwrap_or(false);
+    let has_run_log = run_log_path
+        .as_deref()
+        .map(|path| Path::new(path).exists())
+        .unwrap_or(false);
+    let branch_exists = branch_name
+        .as_deref()
+        .filter(|branch| !branch.trim().is_empty())
+        .and_then(|branch| branch_exists_for_worktree(&path, branch));
+    let session_count = workspace_count(db, "sessions", workspace_id)?;
+    let terminal_run_count = workspace_count(db, "terminal_sessions", workspace_id)?;
+    let terminal_tab_count = workspace_count(db, "pty_terminal_tabs", workspace_id)?;
+    let diff_comment_count = workspace_count(db, "diff_comments", workspace_id)?;
+    let database_record_count =
+        1 + session_count + terminal_run_count + terminal_tab_count + diff_comment_count;
+    let mut warnings = Vec::new();
+    if state != "archived" {
+        warnings.push("Archive this workspace before destructive cleanup.".to_string());
+    }
+    if !worktree_exists {
+        warnings.push("Worktree path is already missing on disk.".to_string());
+    }
+    if branch_name.as_deref().unwrap_or("").trim().is_empty() {
+        warnings.push("No branch is recorded for this workspace.".to_string());
+    }
+
+    Ok(SeverCleanupPreview {
+        workspace_id: workspace_id.to_string(),
+        workspace_name: name,
+        state,
+        branch_name,
+        branch_exists,
+        worktree_path: path,
+        worktree_exists,
+        setup_log_path,
+        run_log_path,
+        has_setup_log,
+        has_run_log,
+        archive_commit,
+        session_count,
+        terminal_run_count,
+        terminal_tab_count,
+        diff_comment_count,
+        database_record_count,
+        warnings,
+    })
+}
+
+fn workspace_count(db: &Connection, table: &str, workspace_id: &str) -> Result<i64, String> {
+    db.query_row(
+        &format!("SELECT COUNT(*) FROM {table} WHERE workspace_id = ?1"),
+        params![workspace_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map_err(|err| err.to_string())
+}
+
+fn branch_exists_for_worktree(path: &str, branch: &str) -> Option<bool> {
+    if !Path::new(path).exists() {
+        return None;
+    }
+    Command::new("git")
+        .arg("show-ref")
+        .arg("--verify")
+        .arg("--quiet")
+        .arg(format!("refs/heads/{branch}"))
+        .current_dir(path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()
+        .map(|status| status.success())
 }
 
 fn cargo_command(action: &str, manifest: &str) -> String {
@@ -4822,6 +4956,7 @@ pub fn run() {
             run_workspace_run_script,
             archive_workspace,
             restore_workspace,
+            preview_sever_cleanup,
             save_workspace_checkpoint,
             get_workspace_diff,
             run_terminal_command,
@@ -5247,6 +5382,68 @@ index ce01362..cc628cc 100644
             .iter()
             .any(|pulse| pulse.id == "lint" && pulse.command == "npm run lint"));
         assert!(pulses.iter().all(|pulse| !pulse.title.is_empty()));
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn sever_cleanup_preview_counts_workspace_artifacts() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let db = Connection::open_in_memory()?;
+        init_db(&db)?;
+        let now = now_ms();
+        let root = std::env::temp_dir().join(format!("loomen-sever-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root)?;
+        let setup_log = root.join("setup.log");
+        std::fs::write(&setup_log, "setup")?;
+        db.execute(
+            "INSERT INTO repos (id, name, path, created_at, updated_at)
+             VALUES ('repo-1', 'repo', ?1, ?2, ?2)",
+            params![root.display().to_string(), now],
+        )?;
+        db.execute(
+            "INSERT INTO workspaces (id, repo_id, name, path, state, branch_name, setup_log_path, run_log_path, archive_commit, created_at, updated_at)
+             VALUES ('workspace-1', 'repo-1', 'cleanup-target', ?1, 'archived', 'codex/demo', ?2, ?3, 'abc123', ?4, ?4)",
+            params![
+                root.display().to_string(),
+                setup_log.display().to_string(),
+                root.join("missing-run.log").display().to_string(),
+                now
+            ],
+        )?;
+        db.execute(
+            "INSERT INTO sessions (id, workspace_id, title, created_at, updated_at)
+             VALUES ('session-1', 'workspace-1', 'session', ?1, ?1)",
+            params![now],
+        )?;
+        db.execute(
+            "INSERT INTO terminal_sessions (id, workspace_id, command, cwd, output, exit_code, started_at, ended_at)
+             VALUES ('terminal-1', 'workspace-1', 'echo ok', ?1, 'ok', 0, ?2, ?2)",
+            params![root.display().to_string(), now],
+        )?;
+        db.execute(
+            "INSERT INTO pty_terminal_tabs (id, workspace_id, cwd, output, is_running, started_at, updated_at)
+             VALUES ('pty-1', 'workspace-1', ?1, 'scrollback', 0, ?2, ?2)",
+            params![root.display().to_string(), now],
+        )?;
+        db.execute(
+            "INSERT INTO diff_comments (id, workspace_id, file_path, line_number, body, created_at)
+             VALUES ('comment-1', 'workspace-1', 'README.md', 1, 'check', ?1)",
+            params![now],
+        )?;
+
+        let preview = sever_cleanup_preview_for_db(&db, "workspace-1")?;
+        assert_eq!(preview.workspace_name, "cleanup-target");
+        assert_eq!(preview.branch_name.as_deref(), Some("codex/demo"));
+        assert!(preview.worktree_exists);
+        assert!(preview.has_setup_log);
+        assert!(!preview.has_run_log);
+        assert_eq!(preview.session_count, 1);
+        assert_eq!(preview.terminal_run_count, 1);
+        assert_eq!(preview.terminal_tab_count, 1);
+        assert_eq!(preview.diff_comment_count, 1);
+        assert_eq!(preview.database_record_count, 5);
+        assert!(preview.warnings.is_empty());
         let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
