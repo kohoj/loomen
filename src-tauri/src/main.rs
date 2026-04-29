@@ -16,7 +16,7 @@ pub(crate) use database::init_db;
 mod git;
 use git::{
     branch_exists_for_worktree, checkpoint_diff, create_git_worktree, detect_default_branch,
-    git_output, list_git_branches, resolve_git_root, save_checkpoint,
+    git_output, resolve_git_root, save_checkpoint,
 };
 mod github;
 use github::{
@@ -37,6 +37,8 @@ mod settings;
 use settings::{
     default_model_for_agent, default_permission_mode, load_settings, save_settings, AppSettings,
 };
+mod snapshot;
+use snapshot::{load_snapshot, AppSnapshot};
 mod sidecar;
 use sidecar::{
     cancel_query as cancel_sidecar_query, send_query_to_sidecar as send_query_to_sidecar_socket,
@@ -74,44 +76,6 @@ impl Drop for SpotlighterProcess {
     }
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Repo {
-    id: String,
-    name: String,
-    path: String,
-    current_branch: Option<String>,
-    default_branch: Option<String>,
-    remote: Option<String>,
-    branches: Vec<String>,
-    setup_script: Option<String>,
-    run_script: Option<String>,
-    run_script_mode: Option<String>,
-    created_at: i64,
-    updated_at: i64,
-    workspaces: Vec<Workspace>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Workspace {
-    id: String,
-    repo_id: String,
-    name: String,
-    path: String,
-    state: String,
-    branch_name: Option<String>,
-    base_branch: Option<String>,
-    checkpoint_id: Option<String>,
-    notes: Option<String>,
-    setup_log_path: Option<String>,
-    run_log_path: Option<String>,
-    archive_commit: Option<String>,
-    created_at: i64,
-    updated_at: i64,
-    sessions: Vec<Session>,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WeavePreview {
@@ -142,37 +106,6 @@ struct WorkspacePlan {
     path_is_empty: bool,
     can_create: bool,
     warnings: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Session {
-    id: String,
-    workspace_id: String,
-    title: String,
-    agent_type: String,
-    model: Option<String>,
-    permission_mode: String,
-    created_at: i64,
-    updated_at: i64,
-    messages: Vec<Message>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Message {
-    id: String,
-    session_id: String,
-    role: String,
-    content: String,
-    created_at: i64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AppSnapshot {
-    db_path: String,
-    repos: Vec<Repo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1672,147 +1605,6 @@ fn list_diff_comments(
 ) -> Result<Vec<DiffComment>, String> {
     let db = state.db.lock().map_err(|err| err.to_string())?;
     list_diff_comments_for_db(&db, &workspace_id)
-}
-
-fn load_snapshot(db: &Connection, db_path: &Path) -> Result<AppSnapshot, String> {
-    let mut repos_stmt = db
-        .prepare(
-            "SELECT id, name, path, current_branch, default_branch, remote, setup_script, run_script, run_script_mode, created_at, updated_at
-             FROM repos ORDER BY updated_at DESC",
-        )
-        .map_err(|err| err.to_string())?;
-    let repo_rows = repos_stmt
-        .query_map([], |row| {
-            Ok(Repo {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                path: row.get(2)?,
-                current_branch: row.get(3)?,
-                default_branch: row.get(4)?,
-                remote: row.get(5)?,
-                branches: Vec::new(),
-                setup_script: row.get(6)?,
-                run_script: row.get(7)?,
-                run_script_mode: row.get(8)?,
-                created_at: row.get(9)?,
-                updated_at: row.get(10)?,
-                workspaces: Vec::new(),
-            })
-        })
-        .map_err(|err| err.to_string())?;
-
-    let mut repos = Vec::new();
-    for repo in repo_rows {
-        let mut repo = repo.map_err(|err| err.to_string())?;
-        repo.branches = list_git_branches(
-            &repo.path,
-            repo.current_branch.as_deref(),
-            repo.default_branch.as_deref(),
-        );
-        repo.workspaces = load_workspaces(db, &repo.id)?;
-        repos.push(repo);
-    }
-
-    Ok(AppSnapshot {
-        db_path: db_path.display().to_string(),
-        repos,
-    })
-}
-
-fn load_workspaces(db: &Connection, repo_id: &str) -> Result<Vec<Workspace>, String> {
-    let mut stmt = db
-        .prepare(
-            "SELECT id, repo_id, name, path, state, branch_name, base_branch, checkpoint_id, notes, setup_log_path, run_log_path, archive_commit, created_at, updated_at
-             FROM workspaces WHERE repo_id = ?1 ORDER BY updated_at DESC",
-        )
-        .map_err(|err| err.to_string())?;
-    let rows = stmt
-        .query_map(params![repo_id], |row| {
-            Ok(Workspace {
-                id: row.get(0)?,
-                repo_id: row.get(1)?,
-                name: row.get(2)?,
-                path: row.get(3)?,
-                state: row.get(4)?,
-                branch_name: row.get(5)?,
-                base_branch: row.get(6)?,
-                checkpoint_id: row.get(7)?,
-                notes: row.get(8)?,
-                setup_log_path: row.get(9)?,
-                run_log_path: row.get(10)?,
-                archive_commit: row.get(11)?,
-                created_at: row.get(12)?,
-                updated_at: row.get(13)?,
-                sessions: Vec::new(),
-            })
-        })
-        .map_err(|err| err.to_string())?;
-
-    let mut workspaces = Vec::new();
-    for workspace in rows {
-        let mut workspace = workspace.map_err(|err| err.to_string())?;
-        workspace.sessions = load_sessions(db, &workspace.id)?;
-        workspaces.push(workspace);
-    }
-    Ok(workspaces)
-}
-
-fn load_sessions(db: &Connection, workspace_id: &str) -> Result<Vec<Session>, String> {
-    let mut stmt = db
-        .prepare(
-            "SELECT id, workspace_id, title, agent_type, model, permission_mode, created_at, updated_at
-             FROM sessions WHERE workspace_id = ?1 ORDER BY updated_at DESC",
-        )
-        .map_err(|err| err.to_string())?;
-    let rows = stmt
-        .query_map(params![workspace_id], |row| {
-            Ok(Session {
-                id: row.get(0)?,
-                workspace_id: row.get(1)?,
-                title: row.get(2)?,
-                agent_type: row.get(3)?,
-                model: row.get(4)?,
-                permission_mode: row.get(5)?,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
-                messages: Vec::new(),
-            })
-        })
-        .map_err(|err| err.to_string())?;
-
-    let mut sessions = Vec::new();
-    for session in rows {
-        let mut session = session.map_err(|err| err.to_string())?;
-        session.messages = load_messages(db, &session.id)?;
-        sessions.push(session);
-    }
-    Ok(sessions)
-}
-
-fn load_messages(db: &Connection, session_id: &str) -> Result<Vec<Message>, String> {
-    let mut stmt = db
-        .prepare(
-            "SELECT id, session_id, role, content, created_at
-             FROM session_messages WHERE session_id = ?1 ORDER BY created_at ASC",
-        )
-        .map_err(|err| err.to_string())?;
-    let rows = stmt
-        .query_map(params![session_id], |row| {
-            Ok(Message {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                role: row.get(2)?,
-                content: row.get(3)?,
-                created_at: row.get(4)?,
-            })
-        })
-        .map_err(|err| err.to_string())?;
-
-    let mut messages = Vec::new();
-    for message in rows {
-        messages.push(message.map_err(|err| err.to_string())?);
-    }
-    Ok(messages)
 }
 
 fn non_empty(value: &str, default: &str) -> String {
