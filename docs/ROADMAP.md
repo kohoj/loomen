@@ -62,7 +62,7 @@ Loomen should grow as a code-evolution instrument: local-first, evidence-rich, v
 
 ## Architecture Health
 
-- Split `src-tauri/src/main.rs` into persistence, git, sidecar, terminal, review, GitHub, settings, and app bootstrap modules.
+- Continue splitting `src-tauri/src/main.rs` into domain modules; Pulse command discovery and evidence storage now live behind a Rust module boundary, with persistence, git, sidecar, terminal, review, GitHub, settings, and app bootstrap still to follow.
 - Split `src/main.ts` into state, rendering, command handlers, agent/session UI, files, changes, terminal, notifications, and settings modules.
 - Add schema migration tests for existing user databases.
 - Add sidecar protocol fixtures for Claude and Codex JSONL variants.
