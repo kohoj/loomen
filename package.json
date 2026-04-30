@@ -4,9 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "cargo run --manifest-path src-tauri/Cargo.toml",
+    "dev": "./script/build_and_run.sh",
     "build": "cargo build --manifest-path src-tauri/Cargo.toml",
-    "sidecar": "bun sidecar/index.ts"
+    "sidecar": "bun sidecar/index.ts",
+    "ui-smoke": "node script/ui_smoke_check.mjs"
   },
   "dependencies": {},
   "devDependencies": {}

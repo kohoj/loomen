@@ -310,6 +310,194 @@ function renderWeavePreview() {
   `;
 }
 
+function renderLoomenMark(size = 180) {
+  // Single mark for the empty state and the brand. A horizon thread, a faint
+  // halo, the lumen ring, and the lumen point itself.
+  return `
+    <svg class="loomen-mark" viewBox="0 0 180 180" role="img" aria-label="Loomen lumen mark" width="${size}" height="${size}">
+      <line class="horizon" x1="14" y1="90" x2="166" y2="90" />
+      <circle class="halo" cx="90" cy="90" r="30" />
+      <circle class="ring" cx="90" cy="90" r="22" />
+      <circle class="lumen" cx="90" cy="90" r="2.4" />
+    </svg>
+  `;
+}
+
+function renderBrandMark() {
+  return `
+    <svg viewBox="0 0 22 22" aria-hidden="true" focusable="false">
+      <line x1="2" y1="11" x2="20" y2="11" stroke="var(--text-3)" stroke-width="0.6" />
+      <circle cx="11" cy="11" r="6.5" stroke="var(--text-1)" stroke-width="1" fill="var(--bg)" />
+      <circle cx="11" cy="11" r="1.6" fill="var(--accent)" />
+    </svg>
+  `;
+}
+
+function renderNoWorkspaceState(repo) {
+  const action = repo ? "toggle-new-workspace" : "toggle-add-repo";
+  const actionLabel = repo ? "Weave workspace" : "Open project";
+  return `
+    <section class="path-empty">
+      <div class="loomen-mark-stack">
+        ${renderLoomenMark(180)}
+        <p class="loomen-mark-tagline">weave a path · seek lumen</p>
+        <button type="button" class="loomen-mark-action" data-action-click="${action}" aria-label="${escapeAttr(actionLabel)}">${escapeHtml(actionLabel)}</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderNoWorkspaceHeader(repo) {
+  return `
+    <header class="chat-header no-workspace-header">
+      <div class="workspace-title">
+        <div class="title-line">
+          <h2>${escapeHtml(repo ? repo.name : "no project")}</h2>
+          <span class="state-pill">${escapeHtml(repo ? "no workspace" : "awaiting source")}</span>
+        </div>
+        <div class="workspace-meta">
+          <span class="checkpoint-dot">${escapeHtml(repo?.path || "open a local git repository to begin")}</span>
+        </div>
+      </div>
+    </header>
+  `;
+}
+
+function renderTopBar(repo, workspace) {
+  const sep = `<span class="topbar-doc-sep">/</span>`;
+  const dot = `<span class="topbar-doc-sep">·</span>`;
+  let docTitle;
+  if (workspace) {
+    docTitle = `<span>${escapeHtml(repo?.name ?? "repo")}</span>${sep}<strong>${escapeHtml(workspace.name)}</strong>${dot}<span>${escapeHtml(workspace.branchName || repo?.defaultBranch || "branch")}</span>`;
+  } else if (repo) {
+    docTitle = `<span>${escapeHtml(repo.name)}</span>${dot}<span>${escapeHtml(repo.currentBranch || repo.defaultBranch || "no branch")}</span>`;
+  } else {
+    docTitle = `<span>no project woven</span>`;
+  }
+  const badge = notificationBadgeCount();
+  return `
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">${renderBrandMark()}</div>
+        <span>loomen</span>
+      </div>
+      <div class="topbar-doc">${docTitle}</div>
+      <div class="topbar-actions">
+        <button type="button" class="topbar-pill" title="Command palette  ⌘K" data-action-click="open-palette">
+          <span class="kbd-hint">⌘K</span>
+        </button>
+        <button type="button" class="topbar-pill ${notificationsOpen ? "active" : ""}" title="Notifications" data-action-click="toggle-notifications">
+          Notifications
+          ${badge ? `<i class="badge">${escapeHtml(badge)}</i>` : ""}
+        </button>
+        ${pending ? `<span class="topbar-pill live"><span class="live-dot"></span>Beaming</span>` : ""}
+        <button type="button" class="topbar-pill" title="Settings" data-action-click="open-settings">Settings</button>
+      </div>
+    </header>
+  `;
+}
+
+function renderPulseHeartbeat() {
+  if (pendingPulseId) {
+    return `<div class="pulse-heartbeat" data-state="running"><div class="bar"></div></div>`;
+  }
+  if (lifecycleRun && lifecycleRun.endedAt && Date.now() - lifecycleRun.endedAt < 1800) {
+    const ok = lifecycleRun.exitCode === 0;
+    return `<div class="pulse-heartbeat ${ok ? "passed" : "failed"}" data-state="${ok ? "passed" : "failed"}"><div class="bar"></div></div>`;
+  }
+  return `<div class="pulse-heartbeat"></div>`;
+}
+
+function renderWorkspaceActions(workspace) {
+  return `
+    <div class="actions">
+      <button class="compact-action" title="Save checkpoint" aria-label="Save checkpoint" data-action-click="checkpoint">Checkpoint</button>
+      <button class="compact-action" title="Workspace diff" aria-label="Workspace diff" data-action-click="diff">Diff</button>
+      <button class="compact-action" title="Archive workspace" aria-label="Archive workspace" data-action-click="archive" ${workspace.state !== "archived" ? "" : "disabled"}>Archive</button>
+      <button class="compact-action" title="Restore workspace" aria-label="Restore workspace" data-action-click="restore" ${workspace.state === "archived" ? "" : "disabled"}>Restore</button>
+      <button class="compact-action" title="Preview cleanup" aria-label="Preview cleanup" data-action-click="sever-preview">Cleanup</button>
+      <button class="compact-action primary-action" title="Start Claude Code" aria-label="Start Claude Code" data-action-click="new-claude">Claude</button>
+      <button class="compact-action" title="Start Codex" aria-label="Start Codex" data-action-click="new-codex">Codex</button>
+    </div>
+  `;
+}
+
+function renderWorkbenchTabs(workspace) {
+  return `
+    <div class="tabs">
+      <button class="tab ${activeMainTab === "scratchpad" ? "active" : ""}" data-center-tab="scratchpad"><span>notes</span>Scratchpad</button>
+      ${
+        workspace.sessions
+          .map(
+            (item) => `
+              <button class="tab ${activeMainTab === "chat" && item.id === selection.sessionId ? "active" : ""}" data-select-session="${item.id}">
+                <span>${escapeHtml(item.agentType)}</span>
+                ${escapeHtml(item.title)}
+                <b data-close-session="${escapeAttr(item.id)}">×</b>
+              </button>
+            `
+          )
+          .join("")
+      }
+      <button class="tab add-tab" data-action-click="new-claude">+</button>
+    </div>
+  `;
+}
+
+function renderWorkbenchComposer(session) {
+  return `
+    <form class="composer ${pending && pendingSessionId ? "beaming" : ""}" data-action="send-query">
+      ${
+        session
+          ? `
+            <div class="composer-toolbar" data-action="session-settings">
+              <span class="agent-selector">${escapeHtml(agentLabel(session.agentType))}</span>
+              <label class="pill-field model-pill">
+                <span>${escapeHtml(modelLabel(session.agentType))}</span>
+                <select name="model">${modelOptions(session)}</select>
+              </label>
+              <span class="effort-pill">${escapeHtml(effortLabel(session.agentType))}</span>
+              <label class="pill-field permission-pill">
+                <span>Mode</span>
+                <select name="permissionMode">
+                  ${permissionOptions(session.permissionMode)}
+                </select>
+              </label>
+              ${renderContextUsage()}
+              <span class="focus-hint">local path</span>
+            </div>
+          `
+          : ""
+      }
+      <textarea name="prompt" rows="3" placeholder="Ask this path to change, @mention files, run /commands" ${session || pending ? "" : "disabled"}>${escapeHtml(draftPrompt)}</textarea>
+      <div class="composer-suggestions-slot">
+        ${renderComposerSuggestions(session)}
+      </div>
+      <button type="submit" ${session && !pending ? "" : "disabled"}>${pending ? "Sending" : "Send"}</button>
+      <button type="button" data-action-click="cancel-query" ${pending && pendingSessionId ? "" : "disabled"}>Cancel</button>
+    </form>
+  `;
+}
+
+function renderWorkbenchInspector(repo, workspace) {
+  return `
+    <aside class="inspector">
+      <div class="panel-top">
+        ${renderPrSummary()}
+        <div class="segmented">
+          <button class="${activeRightPanel === "files" ? "active" : ""}" data-panel="files">Files <span>${escapeHtml(files.length)}</span></button>
+          <button class="${activeRightPanel === "changes" ? "active" : ""}" data-panel="changes">Changes <span>${escapeHtml(changes.length || diffFiles.length)}</span></button>
+          <button class="${activeRightPanel === "checks" ? "active" : ""}" data-panel="checks">Checks <span>${escapeHtml(prInfo?.checks?.length ?? 0)}</span></button>
+        </div>
+      </div>
+      <div class="file-list">
+        ${renderRightPanel()}
+      </div>
+      ${renderRunPanel(repo, workspace)}
+    </aside>
+  `;
+}
+
 function render() {
   if (view === "settings") {
     app.innerHTML = renderSettings();
@@ -322,20 +510,10 @@ function render() {
   const session = currentSession();
 
   app.innerHTML = `
-    <main class="shell">
+    <main class="shell ${workspace ? "" : "no-workspace-shell"}">
+      ${renderTopBar(repo, workspace)}
       <aside class="rail">
-        <div class="rail-toolbar" aria-label="Global controls">
-          <button type="button" class="icon-button ${notificationsOpen ? "active" : ""}" title="Notifications" aria-label="Notifications" data-action-click="toggle-notifications">
-            T${notificationBadgeCount() ? `<i>${escapeHtml(notificationBadgeCount())}</i>` : ""}
-          </button>
-          <button type="button" class="icon-button" title="Command palette" aria-label="Command palette" data-action-click="open-palette">K</button>
-          <button type="button" class="icon-button" title="Settings" aria-label="Settings" data-action-click="open-settings">,</button>
-        </div>
         ${renderNotificationsDrawer()}
-        <div class="brand compact-brand">
-          <div class="mark">L</div>
-          <strong>Loomen</strong>
-        </div>
         <div class="section-title">History</div>
         <div class="list compact history-list">
           ${
@@ -348,12 +526,12 @@ function render() {
                   </button>
                 `
               )
-              .join("") || `<div class="muted-row">No chat history yet</div>`
+              .join("") || `<div class="muted-row">No sessions yet</div>`
           }
         </div>
         <div class="section-title section-title-row">
           <span>Workspaces</span>
-          <button type="button" class="mini-add" title="New workspace" aria-label="New workspace" data-action-click="toggle-new-workspace" ${repo ? "" : "disabled"}>+</button>
+          ${repo ? `<button type="button" class="mini-add" title="New workspace" aria-label="New workspace" data-action-click="toggle-new-workspace">+</button>` : ""}
         </div>
         ${
           newWorkspaceOpen
@@ -366,7 +544,9 @@ function render() {
                 <button type="submit" ${repo && (!weavePreview || weavePreview.canCreate) ? "" : "disabled"}>Weave workspace</button>
               </form>
             `
-            : `<button type="button" class="repo-add-row" data-action-click="toggle-new-workspace" ${repo ? "" : "disabled"}>Weave workspace from ${escapeHtml(repo?.currentBranch || repo?.defaultBranch || "HEAD")}</button>`
+            : repo
+              ? `<button type="button" class="repo-add-row" data-action-click="toggle-new-workspace">Weave from ${escapeHtml(repo.currentBranch || repo.defaultBranch || "HEAD")}</button>`
+              : ""
         }
         <div class="list compact workspace-quick-list">
           ${
@@ -384,17 +564,17 @@ function render() {
         </div>
         <div class="section-title section-title-row">
           <span>Repositories</span>
-          <button type="button" class="mini-add" title="Add repository" aria-label="Add repository" data-action-click="toggle-add-repo">+</button>
+          ${snapshot.repos.length || addRepoOpen ? `<button type="button" class="mini-add" title="Add repository" aria-label="Add repository" data-action-click="toggle-add-repo">+</button>` : ""}
         </div>
         ${
           addRepoOpen
             ? `
               <form class="add-repo" data-action="add-repo">
-                <input name="path" placeholder="Repo path, e.g. ~/Projects/app" />
-                <button type="submit">Add</button>
+                <input name="path" placeholder="Local repository path" />
+                <button type="submit">${snapshot.repos.length ? "Add" : "Open"}</button>
               </form>
             `
-            : `<button type="button" class="repo-add-row" data-action-click="toggle-add-repo">Add repository</button>`
+            : `<button type="button" class="repo-add-row" data-action-click="toggle-add-repo">${snapshot.repos.length ? "Add repository" : "Open project"}</button>`
         }
         <div class="list">
           ${snapshot.repos
@@ -423,129 +603,37 @@ function render() {
         </div>
       </aside>
 
-      <section class="workspace-pane">
-        <header class="pane-header">
-          <div>
-            <h1>${escapeHtml(repo?.name ?? "No repository")}</h1>
-            <p>${escapeHtml(repo?.path ?? "Add a local git repository to begin.")}</p>
-            <p>${escapeHtml([repo?.currentBranch, repo?.defaultBranch, repo?.remote].filter(Boolean).join(" · "))}</p>
-          </div>
-          <code>${escapeHtml(snapshot.dbPath)}</code>
-        </header>
-        <div class="section-title">Workspaces</div>
-        <div class="list compact">
-          ${
-            repo?.workspaces
-              .map(
-                (item) => `
-                  <button class="row ${item.id === selection.workspaceId ? "active" : ""}" data-select-workspace="${item.id}">
-                    <span>${escapeHtml(item.name)}</span>
-                    <small>${escapeHtml(item.branchName || "main")} · ${escapeHtml(item.state)} · ${escapeHtml(item.path)}</small>
-                  </button>
-                `
-              )
-              .join("") ?? ""
-          }
-        </div>
-        <form class="workspace-form" data-action="create-workspace">
-          <input name="name" placeholder="Workspace name" ${repo ? "" : "disabled"} />
-          ${renderBaseBranchSelect(repo)}
-          <input name="path" placeholder="Optional worktree path" ${repo ? "" : "disabled"} />
-          ${renderWeavePreview()}
-          <button type="submit" ${repo && (!weavePreview || weavePreview.canCreate) ? "" : "disabled"}>Weave workspace</button>
-        </form>
-      </section>
-
-      <section class="chat-pane">
+      <section class="workbench">
         <div class="workbench-main">
-          <header class="chat-header">
-            <div class="workspace-title">
-              <div class="title-line">
-                <h2>${escapeHtml(workspace ? `${repo?.name ?? "repo"}/${workspace.name}` : "No workspace selected")}</h2>
-                ${workspace?.state ? `<span class="state-pill">${escapeHtml(workspace.state)}</span>` : ""}
-              </div>
-              <div class="workspace-meta">
-                <button type="button" class="meta-control" title="Base branch">${escapeHtml(workspace?.baseBranch || repo?.defaultBranch || "origin/main")}</button>
-                <button type="button" class="meta-control path-control" title="${escapeAttr(workspace?.path || repo?.path || "")}" data-action-click="open-workspace-finder">${escapeHtml(shortPath(workspace?.path || repo?.path || ""))}</button>
-                ${workspace?.checkpointId ? `<span class="checkpoint-dot" title="${escapeAttr(workspace.checkpointId)}">checkpoint</span>` : ""}
-              </div>
-            </div>
-            <div class="actions">
-              <button class="compact-action" title="Save checkpoint" aria-label="Save checkpoint" data-action-click="checkpoint" ${workspace ? "" : "disabled"}>Save</button>
-              <button class="compact-action" title="Show diff" aria-label="Show diff" data-action-click="diff" ${workspace ? "" : "disabled"}>Diff</button>
-              <button class="compact-action" title="Archive workspace" aria-label="Archive workspace" data-action-click="archive" ${workspace && workspace.state !== "archived" ? "" : "disabled"}>Archive</button>
-              <button class="compact-action" title="Restore workspace" aria-label="Restore workspace" data-action-click="restore" ${workspace?.state === "archived" ? "" : "disabled"}>Restore</button>
-              <button class="compact-action" title="Preview Sever cleanup" aria-label="Preview Sever cleanup" data-action-click="sever-preview" ${workspace ? "" : "disabled"}>Sever</button>
-              <button class="compact-action primary-action" title="New Claude chat" aria-label="New Claude chat" data-action-click="new-claude" ${workspace ? "" : "disabled"}>Claude</button>
-              <button class="compact-action" title="New Codex chat" aria-label="New Codex chat" data-action-click="new-codex" ${workspace ? "" : "disabled"}>Codex</button>
-            </div>
-          </header>
-          <div class="tabs">
-            <button class="tab ${activeMainTab === "scratchpad" ? "active" : ""}" data-center-tab="scratchpad"><span>notes</span>Scratchpad</button>
-            ${
-              workspace?.sessions
-                .map(
-                  (item) => `
-                    <button class="tab ${activeMainTab === "chat" && item.id === selection.sessionId ? "active" : ""}" data-select-session="${item.id}">
-                      <span>${escapeHtml(item.agentType)}</span>
-                      ${escapeHtml(item.title)}
-                      <b data-close-session="${escapeAttr(item.id)}">×</b>
-                    </button>
-                  `
-                )
-                .join("") ?? ""
-            }
-            <button class="tab add-tab" data-action-click="new-claude">+</button>
-          </div>
+          ${
+            workspace
+              ? `
+                <header class="chat-header">
+                  <div class="workspace-title">
+                    <div class="title-line">
+                      <h2>${escapeHtml(`${repo?.name ?? "repo"}/${workspace.name}`)}</h2>
+                      <span class="state-pill">${escapeHtml(workspace.state)}</span>
+                    </div>
+                    <div class="workspace-meta">
+                      <button type="button" class="meta-control" title="Base branch">${escapeHtml(workspace.baseBranch || repo?.defaultBranch || "origin/main")}</button>
+                      <button type="button" class="meta-control path-control" title="${escapeAttr(workspace.path || "")}" data-action-click="open-workspace-finder">${escapeHtml(shortPath(workspace.path || ""))}</button>
+                      ${workspace.checkpointId ? `<span class="checkpoint-dot" title="${escapeAttr(workspace.checkpointId)}">checkpoint</span>` : ""}
+                    </div>
+                  </div>
+                  ${renderWorkspaceActions(workspace)}
+                </header>
+                ${renderPulseHeartbeat()}
+              `
+              : renderNoWorkspaceHeader(repo)
+          }
+          ${workspace ? renderWorkbenchTabs(workspace) : ""}
           <div class="messages">
             ${activeMainTab === "scratchpad" ? renderScratchpad(workspace) : renderConversation(session, workspace, repo)}
           </div>
-          <form class="composer" data-action="send-query">
-            ${
-              session
-                ? `
-                  <div class="composer-toolbar" data-action="session-settings">
-                    <span class="agent-selector">${escapeHtml(agentLabel(session.agentType))}</span>
-                    <label class="pill-field model-pill">
-                      <span>${escapeHtml(modelLabel(session.agentType))}</span>
-                      <select name="model">${modelOptions(session)}</select>
-                    </label>
-                    <span class="effort-pill">${escapeHtml(effortLabel(session.agentType))}</span>
-                    <label class="pill-field permission-pill">
-                      <span>Mode</span>
-                      <select name="permissionMode">
-                        ${permissionOptions(session.permissionMode)}
-                      </select>
-                    </label>
-                    ${renderContextUsage()}
-                    <span class="focus-hint">⌘L to focus</span>
-                  </div>
-                `
-                : ""
-            }
-            <textarea name="prompt" rows="3" placeholder="Ask to make changes, @mention files, run /commands" ${session || pending ? "" : "disabled"}>${escapeHtml(draftPrompt)}</textarea>
-            <div class="composer-suggestions-slot">
-              ${renderComposerSuggestions(session)}
-            </div>
-            <button type="submit" ${session && !pending ? "" : "disabled"}>${pending ? "Sending" : "Send"}</button>
-            <button type="button" data-action-click="cancel-query" ${pending && pendingSessionId ? "" : "disabled"}>Cancel</button>
-          </form>
+          ${workspace ? renderWorkbenchComposer(session) : ""}
         </div>
-        <aside class="inspector">
-          <div class="panel-top">
-            ${renderPrSummary()}
-            <div class="segmented">
-              <button class="${activeRightPanel === "files" ? "active" : ""}" data-panel="files">All files <span>${escapeHtml(files.length)}</span></button>
-              <button class="${activeRightPanel === "changes" ? "active" : ""}" data-panel="changes">Changes <span>${escapeHtml(changes.length || diffFiles.length)}</span></button>
-              <button class="${activeRightPanel === "checks" ? "active" : ""}" data-panel="checks">Checks <span>${escapeHtml(prInfo?.checks?.length ?? 0)}</span></button>
-            </div>
-          </div>
-          <div class="file-list">
-            ${renderRightPanel()}
-          </div>
-          ${renderRunPanel(repo, workspace)}
-        </aside>
       </section>
+      ${workspace ? renderWorkbenchInspector(repo, workspace) : ""}
     </main>
     ${renderCommandPalette()}
     ${renderPrCreateModal()}
@@ -651,6 +739,12 @@ function bindEvents() {
   bindActionClicks("new-codex", () => newSession("codex"));
   bindActionClicks("toggle-notifications", () => {
     notificationsOpen = !notificationsOpen;
+    if (notificationsOpen) {
+      addRepoOpen = false;
+      newWorkspaceOpen = false;
+      weavePreview = null;
+      weavePreviewKey = "";
+    }
     render();
   });
   bindActionClicks("clear-notifications", () => {
@@ -661,11 +755,21 @@ function bindEvents() {
   });
   bindActionClicks("toggle-add-repo", () => {
     addRepoOpen = !addRepoOpen;
+    if (addRepoOpen) {
+      notificationsOpen = false;
+      newWorkspaceOpen = false;
+      weavePreview = null;
+      weavePreviewKey = "";
+    }
     render();
     if (addRepoOpen) document.querySelector('[data-action="add-repo"] input[name="path"]')?.focus();
   });
   bindActionClicks("toggle-new-workspace", () => {
     newWorkspaceOpen = !newWorkspaceOpen;
+    if (newWorkspaceOpen) {
+      notificationsOpen = false;
+      addRepoOpen = false;
+    }
     render();
     if (newWorkspaceOpen) {
       const nameInput = document.querySelector('[data-action="create-workspace"] input[name="name"]');
@@ -977,26 +1081,27 @@ async function refreshWeavePreviewFromForm(event) {
 }
 
 function renderEmptySession(workspace, repo) {
-  if (!workspace) return `<div class="empty">Create a workspace and start a chat.</div>`;
+  if (!workspace) return renderNoWorkspaceState(repo);
   const branch = workspace.branchName || repo?.currentBranch || "branch";
   const fileCount = files.length ? `copied ${formatNumber(files.length)} files` : "ready to inspect files";
   return `
     <section class="onboarding">
-      <h3>You’re in a new copy of ${escapeHtml(repo?.name || "this repo")} called ${escapeHtml(workspace.name)}</h3>
-      <div class="branch-pill">Branched ${escapeHtml(branch)} from ${escapeHtml(workspace.baseBranch || repo?.defaultBranch || "base")}</div>
-      <p>Created <strong>${escapeHtml(workspace.name)}</strong> and ${escapeHtml(fileCount)}</p>
+      <span class="onboarding-kicker">Woven path</span>
+      <h3>${escapeHtml(workspace.name)} is isolated and ready to inspect</h3>
+      <div class="branch-pill">Weave: ${escapeHtml(branch)} from ${escapeHtml(workspace.baseBranch || repo?.defaultBranch || "base")}</div>
+      <p>Inspect the path, start an agent session, then run validation before review. Created <strong>${escapeHtml(workspace.name)}</strong> and ${escapeHtml(fileCount)}.</p>
       <div class="starter-actions">
-        <button type="button" data-quick-prompt="Optional: add a setup script for this repository and explain what it runs.">Optional: add a setup script</button>
-        <button type="button" data-quick-prompt="Run the project’s security audit or dependency audit and summarize the result.">Run security audit</button>
-        <button type="button" data-quick-prompt="Improve the repository’s CLAUDE.md or agent instructions based on the codebase.">Improve CLAUDE.md</button>
-        <button type="button" data-quick-prompt="Find an actionable TODO in this repository and implement it.">Solve a TODO</button>
+        <button type="button" data-quick-prompt="Summarize this workspace: file structure, key modules, and likely test commands.">Inspect this path</button>
+        <button type="button" data-quick-prompt="Add or improve a setup script for this repository and explain what it prepares.">Prepare setup</button>
+        <button type="button" data-quick-prompt="Run validation: execute the project’s main test, lint, or build command and summarize the evidence.">Run validation</button>
+        <button type="button" data-quick-prompt="Find an actionable TODO in this repository and implement it with verification.">Solve a TODO</button>
       </div>
     </section>
   `;
 }
 
 function renderScratchpad(workspace) {
-  if (!workspace) return `<div class="empty">Create a workspace and use Scratchpad notes.</div>`;
+  if (!workspace) return renderNoWorkspaceState(currentRepo());
   return `
     <section class="scratchpad-panel">
       <textarea class="scratchpad" data-action="notes" placeholder="Reference with @notes">${escapeHtml(workspace.notes ?? "")}</textarea>
@@ -1054,7 +1159,7 @@ function renderNotificationsDrawer() {
       <header>
         <strong>Notifications</strong>
         <div>
-          <button type="button" title="Clear notifications" aria-label="Clear notifications" data-action-click="clear-notifications">Clear</button>
+          ${items.length ? `<button type="button" title="Clear notifications" aria-label="Clear notifications" data-action-click="clear-notifications">Clear</button>` : ""}
           <button type="button" title="Close notifications" aria-label="Close notifications" data-action-click="toggle-notifications">x</button>
         </div>
       </header>
@@ -1142,7 +1247,7 @@ function renderRunTab(repo, workspace) {
       ${pulses}
       <div class="panel-empty run-empty">
         <button type="button" data-action-click="add-run-script">Add run script</button>
-        <span>Run tests or a development server to test changes in this workspace</span>
+        <span>Run tests, builds, or dev servers as repeatable evidence for this path.</span>
       </div>
     `;
   }
@@ -1176,14 +1281,14 @@ function renderRunTab(repo, workspace) {
       <button data-action-click="start-spotlight" ${workspace && !spotlighter?.isRunning ? "" : "disabled"}>Spotlight</button>
       <button data-action-click="stop-spotlight" ${spotlighter?.isRunning ? "" : "disabled"}>Stop sync</button>
     </div>
-    ${lifecycleRun ? `<pre class="lifecycle-output">${escapeHtml(`$ ${lifecycleRun.command}\n${lifecycleRun.output}`)}</pre>` : `<div class="panel-empty small">Run tests or a development server to test changes in this workspace</div>`}
+    ${lifecycleRun ? `<pre class="lifecycle-output">${escapeHtml(`$ ${lifecycleRun.command}\n${lifecycleRun.output}`)}</pre>` : `<div class="panel-empty small">Validation evidence will appear after a script runs.</div>`}
   `;
 }
 
 function renderNamedPulses(workspace) {
   if (!workspace) return "";
   if (!namedPulses.length) {
-    return `<div class="named-pulses empty"><span>No named pulses detected</span></div>`;
+    return `<div class="named-pulses empty"><span>No saved scripts detected</span></div>`;
   }
   return `
     <div class="named-pulses">
@@ -1240,12 +1345,12 @@ function renderTerminalTab(workspace, terminal) {
 
 function renderPulseEvidenceTab(workspace) {
   if (!workspace) {
-    return `<div class="panel-empty run-empty">Create a workspace before collecting Pulse evidence</div>`;
+    return `<div class="panel-empty run-empty">Create a workspace before collecting evidence</div>`;
   }
   if (!pulseEvidence.length) {
     return `
       <div class="panel-empty run-empty">
-        <span>No Pulse evidence yet</span>
+        <span>No evidence yet</span>
       </div>
     `;
   }
@@ -1263,7 +1368,7 @@ function renderPulseEvidenceRow(run) {
     <article class="pulse-row ${tone}">
       <header>
         <span class="pulse-kind">${escapeHtml(pulseKindLabel(run.kind))}</span>
-        <strong>${escapeHtml(run.label || run.command || "Pulse")}</strong>
+        <strong>${escapeHtml(run.label || run.command || "Run")}</strong>
         <em>${escapeHtml(run.exitCode === 0 ? "passed" : `exit ${run.exitCode ?? "signal"}`)}</em>
       </header>
       <div class="pulse-meta">
@@ -1286,23 +1391,23 @@ function renderCommandPalette() {
   if (!commandPaletteOpen) return "";
   const slashCommands = workspaceInitInfo?.slashCommands ?? [];
   const commands = [
-    ["new-claude", "New Claude chat", "Start a Claude Code session"],
-    ["new-codex", "New Codex chat", "Start a Codex session"],
+    ["new-claude", "Claude", "Start a Claude Code session"],
+    ["new-codex", "Codex", "Start a Codex session"],
     ["checkpoint", "Save checkpoint", "Write refs/loomen-checkpoints"],
-    ["diff", "Show diff", "Compare workspace against checkpoint"],
+    ["diff", "Diff", "Compare workspace against checkpoint"],
     ["run-setup", "Run setup", "Execute repository setup script"],
-    ["run-script", "Run script", "Execute repository run script"],
-    ["pulse-evidence", "Pulse evidence", "Review recent validation evidence"],
-    ["fuse-readiness", "Fuse readiness", "Review evidence before merging"],
-    ["sever-preview", "Sever preview", "Preview cleanup before deleting anything"],
+    ["run-script", "Run script", "Execute repository validation script"],
+    ["pulse-evidence", "Evidence", "Review recent validation evidence"],
+    ["fuse-readiness", "Readiness", "Review evidence before merging"],
+    ["sever-preview", "Cleanup preview", "Preview cleanup before deleting anything"],
     ["open-workspace", "Open workspace", "Open this workspace in Finder"],
     ["open-repo", "Open repository", "Open the root repository in Finder"],
     ["repo-settings", "Repo settings", "Open repository details and branch info"],
-    ["launch-health", "Launch health", "Ray local runtime dependencies"],
+    ["launch-health", "Launch health", "Inspect local runtime dependencies"],
     ["settings", "Settings", "Open Loomen-style settings"]
   ];
   for (const pulse of namedPulses) {
-    commands.push([`named-pulse:${pulse.id}`, `Pulse ${pulse.title}`, pulse.command]);
+    commands.push([`named-pulse:${pulse.id}`, `Run ${pulse.title}`, pulse.command]);
   }
   const query = paletteQuery.trim().toLowerCase();
   const commandRows = commands.filter(([id, title, detail]) =>
@@ -1625,7 +1730,7 @@ function renderLaunchHealthPanel() {
   const generated = health.generatedAt ? new Date(health.generatedAt).toLocaleTimeString() : "not yet";
   return `
     <h1>Launch Health</h1>
-    <p class="settings-intro">Ray the local runtime before work begins: Git, Bun, agent CLIs, GitHub CLI, database path, rebuild root, and sidecar socket state.</p>
+    <p class="settings-intro">Inspect the local runtime before work begins: Git, Bun, agent CLIs, GitHub CLI, database path, rebuild root, and sidecar socket state.</p>
     <section class="health-summary ${escapeAttr(health.status || "warning")}">
       <div>
         <strong>${escapeHtml(healthStatusTitle(health.status))}</strong>
@@ -2041,7 +2146,7 @@ function renderSeverPreviewModal() {
   ];
   const counts = [
     ["Sessions", severPreview.sessionCount],
-    ["Pulse records", severPreview.terminalRunCount],
+    ["Validation records", severPreview.terminalRunCount],
     ["Terminal tabs", severPreview.terminalTabCount],
     ["Diff comments", severPreview.diffCommentCount]
   ];
@@ -2049,7 +2154,7 @@ function renderSeverPreviewModal() {
     <div class="modal-backdrop">
       <section class="approval-modal sever-modal">
         <header>
-          <strong>Sever cleanup preview</strong>
+          <strong>Cleanup preview</strong>
           <span>${escapeHtml(severPreview.state || "workspace")}</span>
         </header>
         <div class="approval-body">
@@ -2342,14 +2447,14 @@ async function runNamedPulse(pulseId) {
   render();
   lifecycleRun = await invoke("run_named_pulse", { workspaceId: workspace.id, pulseId }).catch((error) => {
     lastError = String(error);
-    pushNotification("Pulse failed", lastError, "error");
+    pushNotification("Run failed", lastError, "error");
     return null;
   });
   pendingPulseId = "";
   if (lifecycleRun) {
     activeRunTab = "evidence";
     pushNotification(
-      `${lifecycleRun.label || "Pulse"} finished`,
+      `${lifecycleRun.label || "Run"} finished`,
       `exit ${lifecycleRun.exitCode ?? "signal"}`,
       lifecycleRun.exitCode === 0 ? "success" : "error"
     );
@@ -2381,7 +2486,7 @@ async function openSeverPreview() {
   if (!workspace) return;
   severPreview = await invoke("preview_sever_cleanup", { workspaceId: workspace.id }).catch((error) => {
     lastError = String(error);
-    pushNotification("Sever preview failed", lastError, "error");
+    pushNotification("Cleanup preview failed", lastError, "error");
     return null;
   });
   if (severPreview) severPreviewOpen = true;
@@ -2610,7 +2715,7 @@ function renderRightPanel() {
 
 function renderFilesPanel() {
   if (!files.length) {
-    return `<div class="panel-empty">No files</div>`;
+    return `<div class="panel-empty">No files yet<br><span>Weave or select a workspace to inspect its path.</span></div>`;
   }
   const visibleFiles = fileFilter.trim()
     ? files.filter((file) => file.path.toLowerCase().includes(fileFilter.trim().toLowerCase()))
@@ -2764,7 +2869,7 @@ function renderPrSummary() {
   if (!prInfo) {
     return `
       <div class="pr-summary loading">
-        <strong>Loading PR info...</strong>
+        <strong>Loading PR evidence...</strong>
         <span>${escapeHtml(workspace?.branchName || "workspace branch")}</span>
       </div>
     `;
@@ -2792,9 +2897,9 @@ function renderFuseReadiness() {
   const items = fuseReadinessItems();
   const tone = readinessTone(items);
   const labels = {
-    ready: ["Ready to fuse", "Local evidence and remote checks are clear"],
+    ready: ["Ready to merge", "Local evidence and remote checks are clear"],
     review: ["Needs review", "Some evidence is missing or still moving"],
-    blocked: ["Not ready to fuse", "Resolve the blocking evidence before merge"]
+    blocked: ["Not ready to merge", "Resolve the blocking evidence before merge"]
   };
   const [title, detail] = labels[tone];
   return `
@@ -2826,7 +2931,7 @@ function fuseReadinessItems() {
       detail: workspace?.checkpointId || "No checkpoint saved"
     },
     {
-      label: "Pulse evidence",
+      label: "Validation evidence",
       status: !latestPulse ? "warning" : latestPulse.exitCode !== 0 ? "failure" : failingPulses ? "warning" : "success",
       detail: !latestPulse
         ? "No recent validation"
@@ -2959,7 +3064,7 @@ function formatCheckDuration(startedAt, completedAt) {
 function pulseKindLabel(kind) {
   if (kind === "setup") return "Setup";
   if (kind === "run") return "Run";
-  if (kind === "pulse") return "Pulse";
+  if (kind === "pulse") return "Run";
   return "Command";
 }
 
